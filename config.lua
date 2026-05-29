@@ -56,11 +56,12 @@ local cfg = {
     -- オーバーシュート（熱の遅れで行き過ぎる）防止の核。
     lookahead           = 4,
 
-    -- 非対称制御: 上げは控えめ、下げは強め（加熱は慎重、冷却は全力＝原発の鉄則）。
-    riseGain            = 0.20, -- 上げの比例ゲイン
-    maxRiseFraction     = 0.08, -- 1tick の上げ上限 = maxBurn × これ（ゆっくり上げる）
-    fallGain            = 1.0,  -- 下げの比例ゲイン（上げより強い）
-    maxFallFraction     = 0.5,  -- 1tick の下げ上限 = maxBurn × これ
+    -- 非対称制御（毎秒あたりの強さ。tickInterval で自動スケール＝周期を変えても挙動同じ）。
+    -- 上げは控えめ、下げは強め（加熱は慎重、冷却は全力＝原発の鉄則）。
+    riseGain            = 0.20, -- 上げの比例ゲイン（毎秒）
+    maxRiseFraction     = 0.08, -- 上げ上限 = maxBurn × これ /秒（ゆっくり上げる）
+    fallGain            = 1.0,  -- 下げの比例ゲイン（上げより強い、毎秒）
+    maxFallFraction     = 0.5,  -- 下げ上限 = maxBurn × これ /秒
 
     minBurnRate         = 0.0,  -- mB/t: 自動制御時の下限（0 まで絞れる）
     maxBurnRateFraction = 1.0,  -- 炉の上限(=燃料集合体数)に対する割合上限
@@ -77,8 +78,12 @@ local cfg = {
     required      = false,-- true にするとタービン未検出で起動を中止する
   },
 
-  -- メインループ間隔（秒）
-  tickInterval = 1,
+  -- メインループ間隔（秒）。0.5 = 2回/秒。短いほど反応・表示が速い。
+  tickInterval = 0.5,
+
+  -- 表示専用の値（actualBurn / boilEff / fuelPct / maxBurn）を何秒ごとに読むか。
+  -- 重い peripheral 呼び出しを毎 tick しないための間引き（安全/制御に必要な値は毎 tick 読む）。
+  extrasRefreshSec = 2,
 
   -- 起動方針: true なら最初は disarmed（炉OFF）でスタート、R キーで人間が点火。
   startDisarmed = true,

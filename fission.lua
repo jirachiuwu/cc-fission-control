@@ -127,11 +127,26 @@ local function doProfile(name)
   end
 end
 
+-- 計測用（更新が本当に毎秒回っているか画面で確認するため）。
+local beat, cycle, lastEpoch, periodSec = 0, 0, nil, 0
+
 -- 1 サイクル分の制御ロジック。-------------------------------------------
 local function tick()
-  local r = reactor:read()
+  beat = beat + 1
+  cycle = cycle + 1
+  local now = os.epoch("utc")
+  if lastEpoch then periodSec = (now - lastEpoch) / 1000 end
+  lastEpoch = now
+
+  -- 表示専用の重い値は extrasRefreshSec ごとにだけ読む（peripheral 呼び出し削減）。
+  local every = math.max(1, math.floor((cfg.extrasRefreshSec or 2) / (cfg.tickInterval or 1) + 0.5))
+  local full = (cycle % every == 1)
+
+  local r = reactor:read(full)
   local turbinePct = turbine and turbine:energyPct() or nil
   r.turbinePct = turbinePct
+  r.beat = beat
+  r.period = periodSec
   local safe, reason = reactor:checkSafety(r, cfg)
 
   if not safe then

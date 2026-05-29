@@ -75,10 +75,16 @@ function ui.render(out, r, state, reason, cfg)
   out.clear()
   local w, h = out.getSize()
 
-  -- row1: タイトル + プロファイル
+  -- row1: タイトル + プロファイル + ハートビート（更新が回ってるか/間隔の実測表示）
   out.setCursorPos(1, 1)
   color(out, colors.cyan); out.write("FISSION CONTROL")
   color(out, colors.lightGray); out.write(" [" .. (cfg.profile or "?") .. "]")
+  local spin = ({ "|", "/", "-", "\\" })[((r.beat or 0) % 4) + 1]
+  local hb = string.format("%s %.1fs", spin, r.period or 0)  -- スピナー + 実測更新間隔(秒)
+  if w - #hb >= 1 then
+    out.setCursorPos(w - #hb + 1, 1)
+    color(out, colors.lightGray); out.write(hb)
+  end
 
   -- row2: 状態 + メッセージ（RUNNING 時は制御内容が入る = 自動制御の可視化）
   out.setCursorPos(1, 2)
@@ -112,20 +118,25 @@ function ui.render(out, r, state, reason, cfg)
     r.maxBurn    and string.format("%.0f", r.maxBurn)    or "?",
     r.actualBurn and string.format("%.1f", r.actualBurn) or "?"))
 
-  -- row5+: バー（縦が足りなければ優先度順に省略）。ボタン用に最下段 2 行を空ける。
-  local contentMax = h - 2
-  local y = 5
-  local function bar(label, pct, lowGood)
-    if y > contentMax then return end
-    drawBar(out, y, label, pct, lowGood, w)
-    y = y + 1
+  -- row5..(h-2): バーを利用可能な縦スペースいっぱいに引き伸ばして配置。
+  -- 縦が広いモニターでは間隔を空けて埋め、狭いと詰める（優先度順、入らない分は省略）。
+  local items = {
+    { "DAMAGE",  r.damage,     true  },
+    { "COOLANT", r.coolantPct, false },
+    { "HEATED",  r.heatedPct,  true  },
+    { "WASTE",   r.wastePct,   true  },
+    { "FUEL",    r.fuelPct,    false },
+  }
+  if r.turbinePct ~= nil then items[#items + 1] = { "TURBINE", r.turbinePct, true } end
+
+  local top, bot = 5, h - 2
+  local n = #items
+  local avail = bot - top + 1
+  local stepF = (n > 0 and avail > n) and (avail / n) or 1
+  for i, m in ipairs(items) do
+    local row = math.floor(top + (i - 1) * stepF + 0.5)
+    if row <= bot then drawBar(out, row, m[1], m[2], m[3], w) end
   end
-  bar("DAMAGE",  r.damage,     true)
-  bar("COOLANT", r.coolantPct, false)
-  bar("HEATED",  r.heatedPct,  true)
-  bar("WASTE",   r.wastePct,   true)
-  bar("FUEL",    r.fuelPct,    false)
-  if r.turbinePct ~= nil then bar("TURBINE", r.turbinePct, true) end
 
   -- ボタン（最下段 2 行固定）。Advanced Monitor ならタッチ可。
   local buttons = {}

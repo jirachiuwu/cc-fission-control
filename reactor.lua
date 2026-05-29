@@ -62,21 +62,33 @@ function Reactor:call(method, ...)
   return nil
 end
 
--- 炉の全状態を 1 回のサイクルで読む。
-function Reactor:read()
-  return {
-    status     = self:call("getStatus"),                              -- boolean: 稼働中か
-    temp       = self:call("getTemperature"),                         -- K
-    damage     = toPct(self:call("getDamagePercent")),               -- %
-    coolantPct = toPct(self:call("getCoolantFilledPercentage")),     -- %
-    heatedPct  = toPct(self:call("getHeatedCoolantFilledPercentage")),-- %
-    fuelPct    = toPct(self:call("getFuelFilledPercentage")),        -- %
-    wastePct   = toPct(self:call("getWasteFilledPercentage")),       -- %
-    burnRate   = self:call("getBurnRate"),                            -- mB/t（設定値）
-    actualBurn = self:call("getActualBurnRate"),                      -- mB/t（実効）
-    maxBurn    = self:call("getMaxBurnRate"),                         -- mB/t（=燃料集合体数）
-    boilEff    = self:call("getBoilEfficiency"),                      -- 0-1
+-- 炉の状態を読む。full=true のときだけ重い「表示専用/低頻度」値も読み直す。
+-- 毎 tick は安全・制御に必要な 7 値だけ読み、peripheral 呼び出し回数を抑える
+-- （400 MOD 等で TPS が低いサーバーでは呼び出し 1 回が重く、ループが遅くなるため）。
+function Reactor:read(full)
+  local r = {
+    status     = self:call("getStatus"),                               -- boolean
+    temp       = self:call("getTemperature"),                          -- K
+    damage     = toPct(self:call("getDamagePercent")),                -- %
+    coolantPct = toPct(self:call("getCoolantFilledPercentage")),      -- %
+    heatedPct  = toPct(self:call("getHeatedCoolantFilledPercentage")), -- %
+    wastePct   = toPct(self:call("getWasteFilledPercentage")),        -- %
+    burnRate   = self:call("getBurnRate"),                             -- mB/t（設定値）
   }
+
+  -- maxBurn は制御に必要だが滅多に変わらない → キャッシュし、full のとき更新。
+  -- fuelPct / actualBurn / boilEff は表示・補助 → 同じく低頻度更新。
+  if full or self._maxBurn == nil then
+    self._maxBurn    = self:call("getMaxBurnRate")
+    self._fuelPct    = toPct(self:call("getFuelFilledPercentage"))
+    self._actualBurn = self:call("getActualBurnRate")
+    self._boilEff    = self:call("getBoilEfficiency")
+  end
+  r.maxBurn    = self._maxBurn
+  r.fuelPct    = self._fuelPct
+  r.actualBurn = self._actualBurn
+  r.boilEff    = self._boilEff
+  return r
 end
 
 -- 安全判定。ok(boolean), reason(string) を返す。
@@ -144,10 +156,6 @@ function Reactor:activate()
   return self:call("activate")
 end
 
--- 温度に応じて burn rate を比例調整する（デッドバンド付き、発振防止）。
--- 安全側に倒すため、増やす前に必ず炉の上限でクランプする。
--- turbineEnergyPct（0-100、無ければ nil）が throttle 閾値以上なら、温度に余裕があっても
--- 出力を上げず下げる（蒸気の行き場が無く逆流→過熱を未然に防ぐ）。
 -- 安全側の自動制御（オーバーシュート＝熱の遅れで行き過ぎる事故への対策）:
 --   1. 緊急: 温度がソフト上限 or 「上昇率から予測した lookahead 秒先」が scram 超え
 --            → burn を半減して叩き落とす（hard scram に到達させない）
@@ -159,13 +167,18 @@ function Reactor:autoAdjust(r, cfg, turbineEnergyPct)
   if not c.enabled then return "AUTO off" end
   if r.temp == nil or r.burnRate == nil or r.maxBurn == nil then return "AUTO: no data" end
 
-  -- 温度上昇率（K/tick）。初回は 0。
-  local rate = r.temp - (self._lastTemp or r.temp)
+  -- 周期（秒）。ゲイン/上限は「毎秒」基準なので dt で実 tick 量にスケールする
+  -- （tickInterval を変えても実時間の挙動が変わらない）。
+  local dt = cfg.tickInterval or 1
+
+  -- 温度上昇率（K/秒）。初回は 0。1tick の差分を dt で割って毎秒に正規化。
+  local ratePerSec = (r.temp - (self._lastTemp or r.temp)) / dt
   self._lastTemp = r.temp
 
   local hardMax   = r.maxBurn * c.maxBurnRateFraction
   local scramTemp = cfg.safety.scramTemp
-  local predicted = r.temp + rate * (c.lookahead or 0)
+  local predicted = r.temp + ratePerSec * (c.lookahead or 0)  -- lookahead 秒先の予測温度
+  local rate = ratePerSec  -- 表示用（dT/秒）
 
   local function set(newRate, fmt, ...)
     if newRate < c.minBurnRate then newRate = c.minBurnRate end
@@ -181,10 +194,10 @@ function Reactor:autoAdjust(r, cfg, turbineEnergyPct)
     return set(r.burnRate * 0.5, "COOL! %.1f->%.1f T=%.0f dT%+.0f")
   end
 
-  -- タービン満タン → 強めに絞る
+  -- タービン満タン → 強めに絞る（毎秒上限 × dt）
   if cfg.turbine and cfg.turbine.enabled and turbineEnergyPct ~= nil
      and turbineEnergyPct >= cfg.turbine.throttleAtPct then
-    return set(r.burnRate - r.maxBurn * c.maxFallFraction, "THROTTLE %.1f->%.1f T=%.0f dT%+.0f")
+    return set(r.burnRate - r.maxBurn * c.maxFallFraction * dt, "THROTTLE %.1f->%.1f T=%.0f dT%+.0f")
   end
 
   local err = c.targetTemp - r.temp
@@ -197,14 +210,15 @@ function Reactor:autoAdjust(r, cfg, turbineEnergyPct)
     if predicted >= c.targetTemp then
       return string.format("WAIT %.1f T=%.0f dT%+.0f", r.burnRate, r.temp, rate)
     end
-    local step = (err / c.targetTemp) * r.maxBurn * c.riseGain
-    local cap  = r.maxBurn * c.maxRiseFraction
+    -- ゲイン/上限は毎秒基準なので dt を掛けて 1tick 分にする
+    local step = (err / c.targetTemp) * r.maxBurn * c.riseGain * dt
+    local cap  = r.maxBurn * c.maxRiseFraction * dt
     if step > cap then step = cap end
     return set(r.burnRate + step, "RAISE %.1f->%.1f T=%.0f dT%+.0f")
   else
-    -- 下げる: 強め
-    local step = (err / c.targetTemp) * r.maxBurn * c.fallGain   -- 負の値
-    local cap  = r.maxBurn * c.maxFallFraction
+    -- 下げる: 強め（毎秒基準 × dt）
+    local step = (err / c.targetTemp) * r.maxBurn * c.fallGain * dt   -- 負の値
+    local cap  = r.maxBurn * c.maxFallFraction * dt
     if step < -cap then step = -cap end
     return set(r.burnRate + step, "LOWER %.1f->%.1f T=%.0f dT%+.0f")
   end
