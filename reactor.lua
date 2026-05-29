@@ -181,6 +181,9 @@ function Reactor:autoAdjust(r, cfg, turbineEnergyPct)
   local rate = ratePerSec  -- 表示用（dT/秒）
 
   local function set(newRate, fmt, ...)
+    -- burn rate を maxBurn の burnStepPct% 刻みに丸める（粗く・安定。±半刻みのヒステリシス）。
+    local unit = r.maxBurn * ((c.burnStepPct or 0) / 100)
+    if unit > 0 then newRate = math.floor(newRate / unit + 0.5) * unit end
     if newRate < c.minBurnRate then newRate = c.minBurnRate end
     if newRate > hardMax then newRate = hardMax end
     if math.abs(newRate - r.burnRate) > 1e-4 then
@@ -200,13 +203,29 @@ function Reactor:autoAdjust(r, cfg, turbineEnergyPct)
     return set(r.burnRate - r.maxBurn * c.maxFallFraction * dt, "THROTTLE %.1f->%.1f T=%.0f dT%+.0f")
   end
 
+  -- 冷却系の余裕（復水/冷却が追いついているか）。温度より先に効く律速。
+  local coolantBackoff = r.coolantPct ~= nil and r.coolantPct < c.coolantBackoffPct
+  local heatedBackoff  = r.heatedPct  ~= nil and r.heatedPct  > c.heatedBackoffPct
+  local coolantStop    = r.coolantPct ~= nil and r.coolantPct < c.coolantStopPct
+  local heatedStop     = r.heatedPct  ~= nil and r.heatedPct  > c.heatedStopPct
+
+  -- 冷却が限界（backoff）→ 温度に関係なく出力を下げる（復水切れによる暴走の本命対策）
+  if coolantBackoff or heatedBackoff then
+    local step = r.maxBurn * c.maxFallFraction * dt
+    return set(r.burnRate - step, "COOL-SAT %.1f->%.1f T=%.0f dT%+.0f")
+  end
+
   local err = c.targetTemp - r.temp
   if math.abs(err) <= c.tempDeadband then
     return string.format("HOLD %.1f T=%.0f dT%+.0f", r.burnRate, r.temp, rate)
   end
 
   if err > 0 then
-    -- 上げる: 予測で目標を超えそうなら上げない（オーバーシュート防止）
+    -- 上げたいが、冷却に余裕がない（stop 到達）なら上げない＝持続可能な点で頭打ち
+    if coolantStop or heatedStop then
+      return string.format("CAP(cool) %.1f T=%.0f dT%+.0f", r.burnRate, r.temp, rate)
+    end
+    -- 予測で目標を超えそうなら上げない（オーバーシュート防止）
     if predicted >= c.targetTemp then
       return string.format("WAIT %.1f T=%.0f dT%+.0f", r.burnRate, r.temp, rate)
     end

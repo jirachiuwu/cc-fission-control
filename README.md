@@ -158,8 +158,9 @@ fission
 制御は **`tickInterval` 秒ごと（既定 1 秒）に 1 回**判定する。核分裂炉は熱に遅れ（thermal lag）があり、攻めた制御は**オーバーシュート（行き過ぎ）→ 過熱事故**を起こす。そこで安全側の 3 段構え:
 
 1. **緊急冷却**: 温度がソフト上限（target と scram の中間）に達する、または**温度上昇率から予測した数秒先**が scram 超え → burn rate を**半減**して叩き落とす（hard scram に到達させない）
-2. **非対称制御**: 上げは控えめ（`maxRiseFraction`）、下げは強め（`maxFallFraction`）。加熱は慎重・冷却は全力
-3. **予測で先回り**: このまま上げると目標を超えそうなら、目標未満でも上げを止める（画面に `WAIT` 表示）
+2. **冷却飽和の先読み（メルトダウン予防の本命）**: burn を上げると、ある点で**復水（冷却材の戻り）が追いつかなくなる**。これは温度より先に「coolant% が下がる」「heated% が上がる」に表れる。これを検知して、**温度が目標未満でも burn を上げない**（`CAP(cool)` 表示）。さらに悪化したら温度に関係なく**下げる**（`COOL-SAT` 表示）。＝冷却が持続可能な burn rate で自動的に頭打ちになる
+3. **非対称制御**: 上げは控えめ（`maxRiseFraction`）、下げは強め（`maxFallFraction`）。加熱は慎重・冷却は全力
+4. **予測で先回り**: このまま上げると目標を超えそうなら、目標未満でも上げを止める（画面に `WAIT` 表示）
 
 | キー | 既定 | 説明 |
 |---|---|---|
@@ -168,6 +169,8 @@ fission
 | `control.fallGain` / `maxFallFraction` | 1.0 / 0.5 | 下げの強さ / 1tick の下げ上限 |
 | `control.tempDeadband` | 10 | 目標±この範囲は触らない（発振防止）|
 | `control.softTemp` | (自動) | 緊急冷却の発動温度（target と scram の中間、プロファイルから自動計算）|
+| `control.coolantStopPct` / `heatedStopPct` | 50 / 50 | coolant がこれ未満 / heated がこれ超で**昇圧停止**（持続可能点で頭打ち）|
+| `control.coolantBackoffPct` / `heatedBackoffPct` | 35 / 80 | さらに悪化したら**強制降圧**（復水切れ暴走の予防）|
 | `tickInterval` | 0.5 | 制御・描画の周期（秒）。0.5 = 2回/秒。ゲインは周期で自動スケールするので変えても挙動同じ |
 | `extrasRefreshSec` | 2 | 表示専用の重い値を読む間隔（秒）。peripheral 呼び出しを間引いて重い鯖でも軽くする |
 
