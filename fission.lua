@@ -20,7 +20,7 @@ local ui      = require("ui")
 
 local reactor = Reactor.new(cfg.adapterName)
 if not reactor:ok() then
-  error("核分裂炉の Logic Adapter が見つからない。隣接 or 有線モデム接続を確認。", 0)
+  error("Fission Reactor Logic Adapter not found. Check adjacency or wired modem.", 0)
 end
 
 -- タービン（任意）。設定で有効なら検出する。
@@ -30,7 +30,7 @@ if cfg.turbine and cfg.turbine.enabled then
   if t:ok() then
     turbine = t
   elseif cfg.turbine.required then
-    error("タービンが見つからない（turbine.required=true）。接続を確認。", 0)
+    error("Turbine not found (turbine.required=true). Check connection.", 0)
   end
 end
 
@@ -60,17 +60,17 @@ end
 local missingCritical, missingOptional = reactor:audit()
 if #missingCritical > 0 then
   term.clear(); term.setCursorPos(1, 1)
-  print("!! 重要メソッドが見つからない（安全チェックが成立しない）:")
+  print("!! Missing safety-critical methods (safety cannot work):")
   for _, m in ipairs(missingCritical) do print("   - " .. m) end
   print("")
-  print("MOD バージョン差で API 名が違う可能性。config.debug=true で生値を確認し、")
-  print("reactor.lua のメソッド名を実際の名前に直すこと。安全のため起動を中止する。")
-  error("critical method 不足のため起動中止", 0)
+  print("API names may differ by Mekanism version. Set config.debug=true to")
+  print("dump raw values, then fix method names in reactor.lua. Aborting for safety.")
+  error("aborting: critical methods missing", 0)
 end
 if #missingOptional > 0 then
-  print("注意: 以下は表示/補助用で安全には影響しないが、未実装:")
+  print("Note: these are display/optional only (no safety impact), not found:")
   for _, m in ipairs(missingOptional) do print("   - " .. m) end
-  print("Enter で続行...")
+  print("Press Enter to continue...")
   read()
 end
 
@@ -92,27 +92,38 @@ local function draw(r, msg)
   buttons = ui.render(out, r, fsmState, msg, cfg)
 end
 
+-- 状態を変えず現在値を読んで再描画する（操作直後の即時フィードバック用）。
+local function refresh(msg)
+  local r = reactor:read()
+  r.turbinePct = turbine and turbine:energyPct() or nil
+  draw(r, msg)
+end
+
 -- 共通アクション（キーとタッチで共有）-------------------------------------
 
 local function doScram()
   reactor:scram()
   fsmState = "DISARMED"   -- 手動停止は DISARMED（トリップではない）
+  refresh("MANUAL SCRAM")
 end
 
 local function doArm()
   local r = reactor:read()
+  r.turbinePct = turbine and turbine:energyPct() or nil
   local safe, reason = reactor:checkSafety(r, cfg)
   if safe then
     reactor:activate()
     fsmState = "RUNNING"
+    draw(r, "ARMED")
   else
-    draw(r, "点火拒否: " .. reason)
+    draw(r, "ARM DENIED: " .. reason)   -- tick で上書きされない（入力後 tick しない）
   end
 end
 
 local function doProfile(name)
   if applyProfile(name) then
     state.save({ profile = cfg.profile })   -- 再起動後も維持
+    refresh("PROFILE -> " .. name)
   end
 end
 
@@ -131,19 +142,17 @@ local function tick()
   end
 
   if fsmState == "RUNNING" then
+    local msg
     if not r.status then
       reactor:activate()
+      msg = "igniting..."
     else
-      reactor:autoAdjust(r, cfg, turbinePct)
-    end
-    local msg = "正常"
-    if turbinePct and cfg.turbine.enabled and turbinePct >= cfg.turbine.throttleAtPct then
-      msg = "タービン満タン → 出力抑制中"
+      msg = reactor:autoAdjust(r, cfg, turbinePct) -- 制御内容を表示（自動制御の可視化）
     end
     draw(r, msg)
   else
     if r.status then reactor:scram() end
-    draw(r, (fsmState == "SCRAMMED") and reason or "待機中 (ARM/R で点火)")
+    draw(r, (fsmState == "SCRAMMED") and reason or "STANDBY (press ARM/R to start)")
   end
 end
 
@@ -189,10 +198,11 @@ local function main()
       timer = os.startTimer(cfg.tickInterval)
     elseif ev[1] == "key" then
       if onKey(ev[2]) then break end
-      tick() -- 操作を即反映
+      -- アクション関数が自分で即描画する（ここで tick() しない＝拒否メッセージ等が消えない）
     elseif ev[1] == "monitor_touch" then
       onTouch(ev[3], ev[4])
-      tick() -- 操作を即反映
+    elseif ev[1] == "monitor_resize" then
+      tick() -- モニターサイズ変更に即追従して再描画
     elseif ev[1] == "terminate" then
       break
     end
@@ -206,7 +216,7 @@ reactor:scram()
 if out.setBackgroundColor then out.setBackgroundColor(colors.black) end
 if out.clear then out.clear() end
 if out.setCursorPos then out.setCursorPos(1, 1) end
-print("fission-control を終了。炉は安全のため SCRAM しました。")
+print("fission-control stopped. Reactor SCRAMmed for safety.")
 if not okRun then
-  print("エラー: " .. tostring(err))
+  print("error: " .. tostring(err))
 end

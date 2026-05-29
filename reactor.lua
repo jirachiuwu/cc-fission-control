@@ -84,29 +84,30 @@ end
 function Reactor:checkSafety(r, cfg)
   local s = cfg.safety
 
+  -- 画面表示は CC が日本語非対応のため ASCII 固定（コメントは日本語 OK）。
   if r.temp == nil then
-    return false, "温度が読めない (フェイルセーフ)"
+    return false, "temp unreadable (failsafe)"
   end
   if r.temp >= s.scramTemp then
-    return false, string.format("高温 %.0fK >= %.0fK", r.temp, s.scramTemp)
+    return false, string.format("HIGH TEMP %.0fK >= %.0fK", r.temp, s.scramTemp)
   end
   if r.damage ~= nil and r.damage >= s.scramDamagePct then
-    return false, string.format("損傷 %.1f%%", r.damage)
+    return false, string.format("DAMAGE %.1f%%", r.damage)
   end
   if r.coolantPct ~= nil and r.coolantPct < s.minCoolantPct then
-    return false, string.format("冷却材不足 %.0f%% < %.0f%%", r.coolantPct, s.minCoolantPct)
+    return false, string.format("LOW COOLANT %.0f%% < %.0f%%", r.coolantPct, s.minCoolantPct)
   end
   if r.heatedPct ~= nil and r.heatedPct >= s.maxHeatedCoolantPct then
-    return false, string.format("加熱冷却材 詰まり %.0f%%", r.heatedPct)
+    return false, string.format("HEATED BACKUP %.0f%%", r.heatedPct)
   end
   if r.wastePct ~= nil and r.wastePct >= s.maxWastePct then
-    return false, string.format("廃棄物 満杯 %.0f%%", r.wastePct)
+    return false, string.format("WASTE FULL %.0f%%", r.wastePct)
   end
   if r.fuelPct ~= nil and r.fuelPct < s.minFuelPct then
-    return false, "燃料切れ"
+    return false, "NO FUEL"
   end
 
-  return true, "正常"
+  return true, "OK"
 end
 
 -- 起動時の能力監査。各メソッドが実際に呼べるか（nil でないか）を調べて返す。
@@ -147,25 +148,30 @@ end
 -- 安全側に倒すため、増やす前に必ず炉の上限でクランプする。
 -- turbineEnergyPct（0-100、無ければ nil）が throttle 閾値以上なら、温度に余裕があっても
 -- 出力を上げず下げる（蒸気の行き場が無く逆流→過熱を未然に防ぐ）。
+-- 戻り値: 制御内容を表す ASCII 文字列（画面に出して「効いてる」のを可視化する）。
 function Reactor:autoAdjust(r, cfg, turbineEnergyPct)
   local c = cfg.control
-  if not c.enabled then return end
-  if r.temp == nil or r.burnRate == nil or r.maxBurn == nil then return end
+  if not c.enabled then return "AUTO off" end
+  if r.temp == nil or r.burnRate == nil or r.maxBurn == nil then return "AUTO: no data" end
 
   local hardMax = r.maxBurn * c.maxBurnRateFraction
   local newRate = r.burnRate
+  local action
 
   local turbineFull = (cfg.turbine and cfg.turbine.enabled
       and turbineEnergyPct ~= nil and turbineEnergyPct >= cfg.turbine.throttleAtPct)
 
   if turbineFull then
     newRate = r.burnRate - c.rateStep      -- タービン満タン → 行き場なし、出力を絞る
+    action = "THROTTLE"
   elseif r.temp > c.targetTemp + c.tempDeadband then
     newRate = r.burnRate - c.rateStep      -- 熱すぎる → 出力を下げる
+    action = "LOWER"
   elseif r.temp < c.targetTemp - c.tempDeadband then
     newRate = r.burnRate + c.rateStep      -- 余裕あり → 出力を上げる
+    action = "RAISE"
   else
-    return                                  -- デッドバンド内 → 触らない
+    return string.format("HOLD burn=%.1f", r.burnRate)  -- デッドバンド内 → 触らない
   end
 
   if newRate < c.minBurnRate then newRate = c.minBurnRate end
@@ -173,7 +179,9 @@ function Reactor:autoAdjust(r, cfg, turbineEnergyPct)
 
   if math.abs(newRate - r.burnRate) > 1e-6 then
     self:call("setBurnRate", newRate)
+    return string.format("%s %.1f->%.1f", action, r.burnRate, newRate)
   end
+  return string.format("%s (limit %.1f)", action, newRate)
 end
 
 Reactor.toPct = toPct
