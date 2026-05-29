@@ -203,25 +203,37 @@ local function onTouch(x, y)
 end
 
 -- メインループ -----------------------------------------------------------
-local function main()
-  tick()
-  local timer = os.startTimer(cfg.tickInterval)
-  while true do
-    local ev = { os.pullEvent() }
-    if ev[1] == "timer" and ev[2] == timer then
-      tick()
-      timer = os.startTimer(cfg.tickInterval)
-    elseif ev[1] == "key" then
-      if onKey(ev[2]) then break end
-      -- アクション関数が自分で即描画する（ここで tick() しない＝拒否メッセージ等が消えない）
-    elseif ev[1] == "monitor_touch" then
-      onTouch(ev[3], ev[4])
-    elseif ev[1] == "monitor_resize" then
-      tick() -- モニターサイズ変更に即追従して再描画
-    elseif ev[1] == "terminate" then
-      break
+-- 制御は sleep ベースの専用コルーチンで回す。
+-- 旧実装は手動タイマー + フィルタ無し os.pullEvent だったが、忙しいサーバー
+-- （多数の MOD）でイベントが大量に飛ぶと CC のイベントキュー（上限256）が溢れ、
+-- 周期タイマーのイベントがドロップ → tick が二度と回らない事故が起きた。
+-- sleep（内部でフィルタ付き pullEvent）はイベント嵐に強いので、これで回す。
+local running = true
+
+local function controlLoop()
+  while running do
+    tick()                  -- 自動制御 + 再描画
+    sleep(cfg.tickInterval) -- フィルタ付き待機（嵐に強い）
+  end
+end
+
+local function inputLoop()
+  while running do
+    local ev, p1, p2, p3 = os.pullEvent()
+    if ev == "key" then
+      if onKey(p1) then running = false; return end
+    elseif ev == "monitor_touch" then
+      onTouch(p2, p3)        -- ARM/SCRAM/プロファイル（即描画）
+    elseif ev == "monitor_resize" then
+      tick()                 -- サイズ変更に即追従
+    elseif ev == "terminate" then
+      running = false; return
     end
   end
+end
+
+local function main()
+  parallel.waitForAny(controlLoop, inputLoop)
 end
 
 -- 終了時: 安全のため炉を止めてから抜ける。
