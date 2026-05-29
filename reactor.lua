@@ -203,14 +203,23 @@ function Reactor:autoAdjust(r, cfg, turbineEnergyPct)
     return set(r.burnRate - r.maxBurn * c.maxFallFraction * dt, "THROTTLE %.1f->%.1f T=%.0f dT%+.0f")
   end
 
-  -- 冷却系の余裕（復水/冷却が追いついているか）。温度より先に効く律速。
-  local coolantBackoff = r.coolantPct ~= nil and r.coolantPct < c.coolantBackoffPct
-  local heatedBackoff  = r.heatedPct  ~= nil and r.heatedPct  > c.heatedBackoffPct
-  local coolantStop    = r.coolantPct ~= nil and r.coolantPct < c.coolantStopPct
-  local heatedStop     = r.heatedPct  ~= nil and r.heatedPct  > c.heatedStopPct
+  -- 冷却の追従を「変化率（トレンド）」で見る。復水は待てば追いつくので、減った量でなく
+  -- 「減り続けているか」を判定する。ノイズ低減のため平滑化（EMA）する。
+  local cP, hP = r.coolantPct, r.heatedPct
+  local cRate = cP and ((cP - (self._lastCoolant or cP)) / dt) or 0  -- %/秒（+で増加）
+  local hRate = hP and ((hP - (self._lastHeated  or hP)) / dt) or 0
+  self._lastCoolant, self._lastHeated = cP, hP
+  self._cRate = (self._cRate or 0) * 0.6 + cRate * 0.4
+  self._hRate = (self._hRate or 0) * 0.6 + hRate * 0.4
 
-  -- 冷却が限界（backoff）→ 温度に関係なく出力を下げる（復水切れによる暴走の本命対策）
-  if coolantBackoff or heatedBackoff then
+  -- 追いついていない = coolant 下降 or heated 上昇のトレンド
+  local coolingFallingSlow = (self._cRate < -c.coolingTrendTol)  or (self._hRate > c.coolingTrendTol)
+  local coolingFallingFast = (self._cRate < -c.coolingTrendFast) or (self._hRate > c.coolingTrendFast)
+  -- 絶対フロア（トレンド無視の最終手前ガード）
+  local coolingFloor = (cP and cP < c.coolantFloorPct) or (hP and hP > c.heatedCeilPct)
+
+  -- 速い悪化 or フロア割れ → 温度に関係なく下げる（暴走の本命対策）
+  if coolingFloor or coolingFallingFast then
     local step = r.maxBurn * c.maxFallFraction * dt
     return set(r.burnRate - step, "COOL-SAT %.1f->%.1f T=%.0f dT%+.0f")
   end
@@ -221,9 +230,10 @@ function Reactor:autoAdjust(r, cfg, turbineEnergyPct)
   end
 
   if err > 0 then
-    -- 上げたいが、冷却に余裕がない（stop 到達）なら上げない＝持続可能な点で頭打ち
-    if coolantStop or heatedStop then
-      return string.format("CAP(cool) %.1f T=%.0f dT%+.0f", r.burnRate, r.temp, rate)
+    -- 上げたいが、冷却がじわじわ追いついていない（下降トレンド）なら上げず待つ＝復水の回復待ち。
+    -- 横ばい/回復に戻れば次のサイクルでまた上げる（＝捌ける上限まで攻める）。
+    if coolingFallingSlow then
+      return string.format("CATCHUP %.1f T=%.0f c%+.1f/s", r.burnRate, r.temp, self._cRate)
     end
     -- 予測で目標を超えそうなら上げない（オーバーシュート防止）
     if predicted >= c.targetTemp then
