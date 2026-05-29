@@ -79,6 +79,7 @@ function ui.render(out, r, state, reason, cfg)
   out.setCursorPos(1, 1)
   color(out, colors.cyan); out.write("FISSION CONTROL")
   color(out, colors.lightGray); out.write(" [" .. (cfg.profile or "?") .. "]")
+  if cfg.version then color(out, colors.gray); out.write(" " .. cfg.version) end
   local spin = ({ "|", "/", "-", "\\" })[((r.beat or 0) % 4) + 1]
   local hb = string.format("%s %.1fs", spin, r.period or 0)  -- スピナー + 実測更新間隔(秒)
   if w - #hb >= 1 then

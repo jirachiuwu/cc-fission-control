@@ -3,6 +3,9 @@
 -- 値を変えたらプログラムを再起動して反映する。
 
 local cfg = {
+  -- バージョン表示。再インストール後にヘッダのこの番号が一致すれば「最新が動いてる」と確認できる。
+  version = "b10",
+
   -- ロジックアダプタの周辺機器名。nil なら自動検出（型名 or getTemperature を持つ機器を総当たり）。
   adapterName = nil,
 
@@ -61,8 +64,8 @@ local cfg = {
     -- ※上げ幅は maxBurn に対する割合。大型炉（例 max 1000）だと割合が大きいと一気に
     --   冷却を超えて即爆発するので、上げ上限は小さめ（既定 0.5%/秒）が安全。
     --   小型炉で遅すぎると感じたら maxRiseFraction を上げる。冷却が追いつかず溶けるなら下げる。
-    riseGain            = 0.10,  -- 上げの比例ゲイン（毎秒）
-    maxRiseFraction     = 0.005, -- 上げ上限 = maxBurn × これ /秒（max1000 なら 5 mB/t/秒）
+    riseGain            = 0.01,  -- 上げの比例ゲイン（毎秒）。実機実証値（max1000級）
+    maxRiseFraction     = 0.01,  -- 上げ上限 = maxBurn × これ /秒（max1000 なら 10 mB/t/秒）
     fallGain            = 1.0,   -- 下げの比例ゲイン（上げより強い、毎秒）
     maxFallFraction     = 0.5,   -- 下げ上限 = maxBurn × これ /秒
 

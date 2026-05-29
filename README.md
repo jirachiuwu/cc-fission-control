@@ -165,7 +165,7 @@ fission
 | キー | 既定 | 説明 |
 |---|---|---|
 | `control.lookahead` | 4 | 温度上昇率から何 tick 先を予測してオーバーシュートを防ぐか |
-| `control.riseGain` / `maxRiseFraction` | 0.10 / 0.005 | 上げの強さ / 上げ上限（炉最大burn 比 /秒）。**大型炉（max1000級）は小さく（即爆発防止）**、小型炉で遅ければ上げる |
+| `control.riseGain` / `maxRiseFraction` | 0.01 / 0.01 | 上げの強さ / 上げ上限（炉最大burn 比 /秒）。**大型炉（max1000級）は小さく（即爆発防止）= 実証値 0.01/0.01**、小型炉で遅ければ上げる |
 | `control.fallGain` / `maxFallFraction` | 1.0 / 0.5 | 下げの強さ / 1tick の下げ上限 |
 | `control.tempDeadband` | 10 | 目標±この範囲は触らない（発振防止）|
 | `control.softTemp` | (自動) | 緊急冷却の発動温度（target と scram の中間、プロファイルから自動計算）|
