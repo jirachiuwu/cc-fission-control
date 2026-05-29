@@ -212,16 +212,20 @@ function Reactor:autoAdjust(r, cfg, turbineEnergyPct)
   self._cRate = (self._cRate or 0) * 0.6 + cRate * 0.4
   self._hRate = (self._hRate or 0) * 0.6 + hRate * 0.4
 
-  -- 追いついていない = coolant 下降 or heated 上昇のトレンド
-  local coolingFallingSlow = (self._cRate < -c.coolingTrendTol)  or (self._hRate > c.coolingTrendTol)
-  local coolingFallingFast = (self._cRate < -c.coolingTrendFast) or (self._hRate > c.coolingTrendFast)
-  -- 絶対フロア（トレンド無視の最終手前ガード）
+  -- 急速悪化（過渡）/ フロア割れ → 温度に関係なく強く下げる（暴走の本命対策）
+  local coolingFast  = (self._cRate < -c.coolingTrendFast) or (self._hRate > c.coolingTrendFast)
   local coolingFloor = (cP and cP < c.coolantFloorPct) or (hP and hP > c.heatedCeilPct)
-
-  -- 速い悪化 or フロア割れ → 温度に関係なく下げる（暴走の本命対策）
-  if coolingFloor or coolingFallingFast then
+  if coolingFloor or coolingFast then
     local step = r.maxBurn * c.maxFallFraction * dt
     return set(r.burnRate - step, "COOL-SAT %.1f->%.1f T=%.0f dT%+.0f")
+  end
+
+  -- クーラント残量が目標を下回る（= 冷却が追いついていない）→ 温度に関係なく緩やかに下げ、
+  -- 目標残量に戻す。復水が追いつけば残量が回復し、下の温度制御がまた上げる＝持続可能点に張り付く。
+  local coolingBelow = (cP and cP < c.coolantTargetPct) or (hP and hP > c.heatedTargetPct)
+  if coolingBelow then
+    local step = r.maxBurn * c.maxRiseFraction * dt   -- 上げと同じ緩やかさで下げる
+    return set(r.burnRate - step, "EASE %.1f->%.1f T=%.0f dT%+.0f")
   end
 
   local err = c.targetTemp - r.temp
@@ -230,11 +234,6 @@ function Reactor:autoAdjust(r, cfg, turbineEnergyPct)
   end
 
   if err > 0 then
-    -- 上げたいが、冷却がじわじわ追いついていない（下降トレンド）なら上げず待つ＝復水の回復待ち。
-    -- 横ばい/回復に戻れば次のサイクルでまた上げる（＝捌ける上限まで攻める）。
-    if coolingFallingSlow then
-      return string.format("CATCHUP %.1f T=%.0f c%+.1f/s", r.burnRate, r.temp, self._cRate)
-    end
     -- 予測で目標を超えそうなら上げない（オーバーシュート防止）
     if predicted >= c.targetTemp then
       return string.format("WAIT %.1f T=%.0f dT%+.0f", r.burnRate, r.temp, rate)
