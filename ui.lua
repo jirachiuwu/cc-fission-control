@@ -148,11 +148,40 @@ function ui.render(out, r, state, reason, cfg)
     y = y + 1
   end
 
-  -- フッタ（操作ヒント）
-  out.setCursorPos(1, h)
+  -- 操作ボタン（Advanced Monitor ならタッチ可、キーでも操作可）。
+  -- 戻り値の buttons リストで当たり判定する（{x1,y1,x2,y2,action}）。
+  local buttons = {}
+  local function btn(x, y, label, action, active)
+    local isC = out.isColor and out.isColor()
+    if isC then
+      bgColor(out, active and colors.cyan or colors.gray)
+      color(out, active and colors.black or colors.white)
+    end
+    out.setCursorPos(x, y)
+    out.write(label)
+    if isC then bgColor(out, colors.black); color(out, colors.white) end
+    buttons[#buttons + 1] = { x1 = x, y1 = y, x2 = x + #label - 1, y2 = y, action = action }
+    return x + #label + 1
+  end
+
+  -- プロファイル行
+  local py = h - 1
+  local nx = 1
+  nx = btn(nx, py, " SAFETY ",  "profile:safety",      cfg.profile == "safety")
+  nx = btn(nx, py, " BALANCE ", "profile:balance",     cfg.profile == "balance")
+  nx = btn(nx, py, " PERF ",    "profile:performance", cfg.profile == "performance")
+
+  -- 点火/停止行 + キーヒント
+  local ay = h
+  local ax = 1
+  ax = btn(ax, ay, " ARM ",   "arm",   state == "RUNNING")
+  ax = btn(ax, ay, " SCRAM ", "scram", false)
+  out.setCursorPos(ax, ay)
   color(out, colors.lightGray)
-  out.write("[R]arm/start  [S]scram  [Q]quit")
+  out.write("R/S/Q")
   color(out, colors.white)
+
+  return buttons
 end
 
 -- デバッグ: API 生値を term に一覧表示してスケールを確認する。

@@ -1,18 +1,21 @@
 -- fission.lua  —  Mekanism 核分裂炉 自動制御（CC: Tweaked）
 --
 -- 状態機械（安全最優先）:
---   DISARMED : 炉OFF。人間が R を押すまで点火しない。
+--   DISARMED : 炉OFF。R/ARM を押すまで点火しない。
 --   RUNNING  : 炉ON。温度に応じて burn rate を自動調整。
---   SCRAMMED : 安全トリップで緊急停止。R で再アームするまで再点火しない（ラッチ）。
+--   SCRAMMED : 安全トリップで緊急停止。再アームするまで再点火しない（ラッチ）。
+--
+-- 操作はキー（R/S/Q）とモニタータッチ（ボタン）の両対応。共通の関数を呼ぶ。
 --
 -- 鉄則:
 --   * 安全判定が NG の瞬間に必ず scram する（毎サイクル評価）。
---   * トリップ後は自動再起動しない。人間の R 入力を要求する。
+--   * トリップ後は自動再起動しない。人間の再アームを要求する。
 --   * 重要値が読めなければ危険とみなす（reactor.lua のフェイルセーフ）。
 
 local cfg     = require("config")
 local Reactor = require("reactor")
 local Turbine = require("turbine")
+local state   = require("state")
 local ui      = require("ui")
 
 local reactor = Reactor.new(cfg.adapterName)
@@ -33,13 +36,27 @@ end
 
 local out = ui.resolveOutput(cfg.monitorName)
 
+-- 保存済み設定（プロファイル）を復元して config に反映する。
+local function applyProfile(name)
+  local p = cfg.profiles[name]
+  if not p then return false end
+  cfg.profile = name
+  cfg.safety.scramTemp   = p.scramTemp
+  cfg.control.targetTemp = p.targetTemp
+  return true
+end
+
+do
+  local saved = state.load()
+  if saved.profile then applyProfile(saved.profile) end
+end
+
 -- 起動時デバッグダンプ
 if cfg.debug then
   ui.dumpRaw(reactor)
 end
 
 -- 能力監査: メソッド名が MOD バージョンで違わないか起動時に確認する。
--- critical が欠けると安全チェックが無効化されるため、その場合は点火を拒否して終了。
 local missingCritical, missingOptional = reactor:audit()
 if #missingCritical > 0 then
   term.clear(); term.setCursorPos(1, 1)
@@ -53,41 +70,68 @@ end
 if #missingOptional > 0 then
   print("注意: 以下は表示/補助用で安全には影響しないが、未実装:")
   for _, m in ipairs(missingOptional) do print("   - " .. m) end
-  print("（燃料切れ自動停止が無効になる場合があるが、燃料切れ自体は炉を傷めない）")
   print("Enter で続行...")
   read()
 end
 
--- 初期状態。起動直後は安全のため炉を止める（既に動いていても一旦 scram）。
-local state = "DISARMED"
+-- 状態と最後に描画したボタン群。
+local fsmState = "DISARMED"
+local buttons = {}
+
+-- 起動直後は安全のため炉を止める（既に動いていても一旦 scram）。
 do
   local r0 = reactor:read()
   if r0.status and cfg.startDisarmed then
     reactor:scram()
   elseif r0.status then
-    state = "RUNNING" -- startDisarmed=false かつ既に稼働中なら制御を引き継ぐ
+    fsmState = "RUNNING"
   end
 end
 
--- 1 サイクル分の制御ロジック。
+local function draw(r, msg)
+  buttons = ui.render(out, r, fsmState, msg, cfg)
+end
+
+-- 共通アクション（キーとタッチで共有）-------------------------------------
+
+local function doScram()
+  reactor:scram()
+  fsmState = "DISARMED"   -- 手動停止は DISARMED（トリップではない）
+end
+
+local function doArm()
+  local r = reactor:read()
+  local safe, reason = reactor:checkSafety(r, cfg)
+  if safe then
+    reactor:activate()
+    fsmState = "RUNNING"
+  else
+    draw(r, "点火拒否: " .. reason)
+  end
+end
+
+local function doProfile(name)
+  if applyProfile(name) then
+    state.save({ profile = cfg.profile })   -- 再起動後も維持
+  end
+end
+
+-- 1 サイクル分の制御ロジック。-------------------------------------------
 local function tick()
   local r = reactor:read()
   local turbinePct = turbine and turbine:energyPct() or nil
-  r.turbinePct = turbinePct -- UI 表示用に載せる
+  r.turbinePct = turbinePct
   local safe, reason = reactor:checkSafety(r, cfg)
 
   if not safe then
-    -- 危険: 無条件で停止 + ラッチ
     if r.status then reactor:scram() end
-    state = "SCRAMMED"
-    ui.render(out, r, state, reason, cfg)
+    fsmState = "SCRAMMED"
+    draw(r, reason)
     return
   end
 
-  -- 安全な場合の挙動は state による
-  if state == "RUNNING" then
+  if fsmState == "RUNNING" then
     if not r.status then
-      -- 何らかの理由で炉が止まっている → 再点火（安全圏なので）
       reactor:activate()
     else
       reactor:autoAdjust(r, cfg, turbinePct)
@@ -96,36 +140,45 @@ local function tick()
     if turbinePct and cfg.turbine.enabled and turbinePct >= cfg.turbine.throttleAtPct then
       msg = "タービン満タン → 出力抑制中"
     end
-    ui.render(out, r, state, msg, cfg)
+    draw(r, msg)
   else
-    -- DISARMED / SCRAMMED: 炉は止めたまま待機
     if r.status then reactor:scram() end
-    ui.render(out, r, state, (state == "SCRAMMED") and reason or "待機中 (Rで点火)", cfg)
+    draw(r, (fsmState == "SCRAMMED") and reason or "待機中 (ARM/R で点火)")
   end
 end
 
--- キー入力の処理。
-local function onKey(key)
-  if key == keys.s then
-    reactor:scram()
-    state = "DISARMED"     -- 手動停止は DISARMED（トリップではない）
-  elseif key == keys.r then
-    -- 再アーム: 今の瞬間が安全な時だけ許可する
-    local r = reactor:read()
-    local safe, reason = reactor:checkSafety(r, cfg)
-    if safe then
-      reactor:activate()
-      state = "RUNNING"
-    else
-      ui.render(out, r, "SCRAMMED", "点火拒否: " .. reason, cfg)
-    end
-  elseif key == keys.q then
-    return true -- ループ終了
+-- 入力処理 ---------------------------------------------------------------
+local function handleAction(action)
+  if action == "scram" then
+    doScram()
+  elseif action == "arm" then
+    doArm()
+  elseif action == "profile:safety" then
+    doProfile("safety")
+  elseif action == "profile:balance" then
+    doProfile("balance")
+  elseif action == "profile:performance" then
+    doProfile("performance")
   end
+end
+
+local function onKey(key)
+  if key == keys.s then doScram()
+  elseif key == keys.r then doArm()
+  elseif key == keys.q then return true end
   return false
 end
 
--- メインループ: タイマーで tick、その間にキーイベントを拾う。
+local function onTouch(x, y)
+  for _, b in ipairs(buttons) do
+    if x >= b.x1 and x <= b.x2 and y >= b.y1 and y <= b.y2 then
+      handleAction(b.action)
+      return
+    end
+  end
+end
+
+-- メインループ -----------------------------------------------------------
 local function main()
   tick()
   local timer = os.startTimer(cfg.tickInterval)
@@ -136,13 +189,17 @@ local function main()
       timer = os.startTimer(cfg.tickInterval)
     elseif ev[1] == "key" then
       if onKey(ev[2]) then break end
+      tick() -- 操作を即反映
+    elseif ev[1] == "monitor_touch" then
+      onTouch(ev[3], ev[4])
+      tick() -- 操作を即反映
     elseif ev[1] == "terminate" then
       break
     end
   end
 end
 
--- プログラム終了時の挙動: 安全のため炉を止めてから抜ける。
+-- 終了時: 安全のため炉を止めてから抜ける。
 local okRun, err = pcall(main)
 
 reactor:scram()

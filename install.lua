@@ -4,7 +4,7 @@
 
 local BASE = "https://raw.githubusercontent.com/jirachiuwu/cc-fission-control/main/"
 
-local files = { "config.lua", "reactor.lua", "turbine.lua", "ui.lua", "fission.lua", "startup.lua" }
+local files = { "config.lua", "reactor.lua", "turbine.lua", "state.lua", "ui.lua", "fission.lua", "startup.lua" }
 
 print("cc-fission-control をインストールします...")
 for _, f in ipairs(files) do

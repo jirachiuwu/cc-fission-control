@@ -52,13 +52,17 @@ Logic Adapter はコンピュータに**隣接**させるか、**有線モデム
 
 ## 操作
 
-| キー | 動作 |
-|---|---|
-| `R` | アーム/点火（その瞬間が安全な時だけ許可。SCRAM 後の再アームもこれ）|
-| `S` | 手動 SCRAM（即停止、DISARMED へ）|
-| `Q` | プログラム終了（**終了時は安全のため炉を SCRAM する**）|
+キーと、**Advanced Monitor のタッチ**の両対応。
 
-状態: `DISARMED`（待機・炉OFF）/ `RUNNING`（稼働・自動制御中）/ `SCRAMMED`（安全トリップ・要再アーム）
+| キー | 画面ボタン | 動作 |
+|---|---|---|
+| `R` | `ARM` | アーム/点火（その瞬間が安全な時だけ許可。SCRAM 後の再アームもこれ）|
+| `S` | `SCRAM` | 手動 SCRAM（即停止、DISARMED へ）|
+| `Q` | — | プログラム終了（**終了時は安全のため炉を SCRAM する**）|
+| — | `SAFETY`/`BALANCE`/`PERF` | 運転プロファイルをその場で切替（即反映 + ファイル保存）|
+
+- プロファイルは画面タッチで切り替えられ、`state` ファイルに**保存**される（再起動後も維持）。`config.lua` の `profile` は初期値。
+- 状態: `DISARMED`（待機・炉OFF）/ `RUNNING`（稼働・自動制御中）/ `SCRAMMED`（安全トリップ・要再アーム）
 
 ## ComputerCraft セッティング（物理セットアップ）
 
@@ -112,6 +116,7 @@ wget run https://raw.githubusercontent.com/jirachiuwu/cc-fission-control/main/in
 wget https://raw.githubusercontent.com/jirachiuwu/cc-fission-control/main/config.lua  config.lua
 wget https://raw.githubusercontent.com/jirachiuwu/cc-fission-control/main/reactor.lua reactor.lua
 wget https://raw.githubusercontent.com/jirachiuwu/cc-fission-control/main/turbine.lua turbine.lua
+wget https://raw.githubusercontent.com/jirachiuwu/cc-fission-control/main/state.lua   state.lua
 wget https://raw.githubusercontent.com/jirachiuwu/cc-fission-control/main/ui.lua      ui.lua
 wget https://raw.githubusercontent.com/jirachiuwu/cc-fission-control/main/fission.lua  fission.lua
 wget https://raw.githubusercontent.com/jirachiuwu/cc-fission-control/main/startup.lua  startup.lua
