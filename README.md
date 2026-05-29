@@ -147,41 +147,46 @@ fission
 | `safety.minCoolantPct` | 25 | 冷却材がこれ未満でSCRAM（%）|
 | `safety.maxHeatedCoolantPct` | 95 | 加熱冷却材の詰まりでSCRAM（%）|
 | `safety.maxWastePct` | 92 | 廃棄物満杯でSCRAM（%）|
-| `control.targetTemp` | (profile) | 自動制御の目標温度（K、プロファイルで決まる）|
+| `control.targetBurnRate` | nil | 保持する burn rate（mB/t）。自分の安全値を入れる。nil なら下の割合 |
+| `control.targetBurnFraction` | 0.10 | targetBurnRate=nil 時の炉最大に対する割合（保守的）|
 | `control.maxBurnRateFraction` | 1.0 | 炉上限に対する burn rate の割合上限 |
 | `turbine.enabled` | true | タービン監視の ON/OFF |
 | `turbine.throttleAtPct` | 99 | タービンエネルギーがこれ以上なら出力を絞る（%）|
 | `turbine.required` | false | true でタービン未検出時に起動中止 |
 
-## 自動制御の仕組み / チューニング
+## 自動制御の仕組み / チューニング（設計思想 v2）
 
-制御は **`tickInterval` 秒ごと（既定 1 秒）に 1 回**判定する。核分裂炉は熱に遅れ（thermal lag）があり、攻めた制御は**オーバーシュート（行き過ぎ）→ 過熱事故**を起こす。そこで安全側の 3 段構え:
+**「温度を追って限界まで攻める」のはやめた。** Mekanism の冷却限界は崖（タービンが詰まると一気に dry out → 即メルトダウン）で、探りながら近づくのは原理的に危険だから。代わりに **cc-mek-scada と同じ思想 = 「自分の構成で安全と分かっている burn rate を設定 → そこまで緩やかに上げて保持 → 異常時だけ自動降圧」**。
 
-1. **緊急冷却**: 温度がソフト上限（target と scram の中間）に達する、または**温度上昇率から予測した数秒先**が scram 超え → burn rate を**半減**して叩き落とす（hard scram に到達させない）
-2. **冷却の追従＝クーラント残量を目標値に保つ（メルトダウン予防の本命）**: burn を上げると、ある点で**復水（冷却材の戻り）が追いつかなくなり coolant 残量が下がる**（heated は上がる）。残量が目標（既定 90%）を下回ったら、温度に関係なく**緩やかに burn を下げて目標へ戻す**（`EASE` 表示）。復水が追いつけば残量が回復し、温度制御が**また上げる**＝**冷却が捌ける持続可能点に張り付く**。急速悪化やフロア割れ(40/60) → 温度無視で**強く下げる**（`COOL-SAT`）。この動作は実物コードを物理モデルで回して収束（溶融なし）を確認済み（`sim/verify_control.py`）
-3. **非対称制御**: 上げは控えめ（`maxRiseFraction`）、下げは強め（`maxFallFraction`）。加熱は慎重・冷却は全力
-4. **予測で先回り**: このまま上げると目標を超えそうなら、目標未満でも上げを止める（画面に `WAIT` 表示）
+- **通常**: `targetBurnRate`（または `targetBurnFraction`）まで緩やかにランプして**保持**（`RAISE`→`HOLD`）。
+- **安全オーバーライド（下げる方向のみ）**:
+  - `COOL!` 温度がソフト上限 or 予測で scram 超え → burn 半減
+  - `COOL-SAT` 冷却フロア割れ / **急速悪化（崖の入り口を %/秒で検知）** → 強く降圧
+  - `EASE` クーラント残量が目標未満 → 緩やかに降圧
+  - `THROTTLE` タービン満タン → 降圧
+
+→ **`targetBurnRate` に自分の安全値を入れれば、そこで安定保持**。高すぎる値を入れても安全層が頭打ちにして溶けない（振動が「設定高すぎ」のサインになる）。実物コードを物理モデルで回し、適正値=ロック安定 / 過大値=溶融なしを確認済み（`sim/verify_control.py`）。
 
 | キー | 既定 | 説明 |
 |---|---|---|
-| `control.lookahead` | 4 | 温度上昇率から何 tick 先を予測してオーバーシュートを防ぐか |
-| `control.riseGain` / `maxRiseFraction` | 0.01 / 0.01 | 上げの強さ / 上げ上限（炉最大burn 比 /秒）。**大型炉（max1000級）は小さく（即爆発防止）= 実証値 0.01/0.01**、小型炉で遅ければ上げる |
-| `control.fallGain` / `maxFallFraction` | 1.0 / 0.5 | 下げの強さ / 1tick の下げ上限 |
-| `control.tempDeadband` | 10 | 目標±この範囲は触らない（発振防止）|
-| `control.softTemp` | (自動) | 緊急冷却の発動温度（target と scram の中間、プロファイルから自動計算）|
-| `control.coolantTargetPct` / `heatedTargetPct` | 90 / 10 | coolant をこれ以上 / heated をこれ以下にキープ。下回ると緩降圧（`EASE`）。**出力をもっと攻めたいなら coolant を下げる（例 80）** |
-| `control.coolantFloorPct` / `heatedCeilPct` | 40 / 60 | これを割ると**強制降圧**（`COOL-SAT`、scram 25/95 の手前ガード）|
-| `control.coolingTrendFast` | 3.0 | %/秒。急速悪化（過渡）で**強制降圧** |
-| `tickInterval` | 0.5 | 制御・描画の周期（秒）。0.5 = 2回/秒。ゲインは周期で自動スケールするので変えても挙動同じ |
-| `extrasRefreshSec` | 2 | 表示専用の重い値を読む間隔（秒）。peripheral 呼び出しを間引いて重い鯖でも軽くする |
+| **`control.targetBurnRate`** | nil | **★保持したい burn rate（mB/t 絶対値）。手動で安全に回せてた値を入れる。** nil なら下の Fraction |
+| `control.targetBurnFraction` | 0.10 | targetBurnRate=nil 時、炉最大に対する割合（保守的既定 10%）|
+| `control.maxRiseFraction` | 0.01 | 目標へ上げる速さ上限（炉最大 /秒）。大型炉は小さく。遅ければ上げる |
+| `control.maxFallFraction` | 0.5 | 安全降圧の速さ上限（炉最大 /秒）。下げは速くて安全 |
+| `control.softTemp` | (自動) | これ以上で burn 半減（target と scram の中間、自動計算）|
+| `control.lookahead` | 4 | 温度上昇率から何秒先を予測して半減を早めるか |
+| `control.coolantTargetPct` / `heatedTargetPct` | 90 / 10 | この残量を割ると `EASE` で降圧。**出力を攻めるなら coolant を下げる（例 80）** |
+| `control.coolantFloorPct` / `heatedCeilPct` | 40 / 60 | 割ると `COOL-SAT` 強制降圧 |
+| `control.coolingTrendFast` | 3.0 | %/秒。**急速悪化（崖の入り口）で即 `COOL-SAT`** ＝メルトダウン直前の最重要保険 |
+| `tickInterval` | 0.5 | 制御・描画の周期（秒）。2回/秒 |
+| `extrasRefreshSec` | 2 | 表示専用の重い値を読む間隔（秒）|
 
-> 画面右上の `|/-\` スピナーと `0.5s` は**実測の更新間隔**。これが回っていれば制御は動いている。もしモニター表示が固まって見えるのにボタンを押すとスピナー（と数値）が一気に進む場合は、サーバー（低 TPS）がモニターのクライアント同期を間引いているのが原因で、プログラム自体は動いている。
-
-> **遅い**と感じたら `riseGain` / `maxRiseFraction` を上げる。**振動/行き過ぎ**するなら下げる。安全マージンが薄いと感じたらプロファイルの `scramTemp` を下げる。画面の `dT` は温度上昇率（+で上昇中）。
+> **使い方**: まず `targetBurnFraction` の保守値（10%）で安全に回す → 問題なければ `targetBurnRate` に手動で安全だった実値を入れて少しずつ上げる。`COOL-SAT` が頻発するなら目標が高すぎ＝下げる。
+> 画面右上の `|/-\` スピナーと `0.5s` は**実測の更新間隔**。これが回っていれば制御は生きている。固まって見えるのにタップで数値が一気に進むなら、サーバー（低 TPS）のモニター同期遅延でコード自体は動いている。
 
 ## 仕組み
 
-`peripheral.find("fissionReactorLogicAdapter")`（取れなければ `getTemperature` を持つ機器を総当たり）でアダプタを掴み、毎サイクル `getTemperature` / `getDamagePercent` / `get*FilledPercentage` 等を読む。安全判定を通れば、目標温度との差分で `setBurnRate` を比例調整。危険なら `scram()`。
+`peripheral.find("fissionReactorLogicAdapter")`（取れなければ `getTemperature` を持つ機器を総当たり）でアダプタを掴み、毎サイクル `getTemperature` / `getDamagePercent` / `get*FilledPercentage` 等を読む。安全判定を通れば、設定した目標 burn rate へ向けて `setBurnRate` を緩やかにランプして保持。温度・冷却・タービンの異常時だけ降圧、危険なら `scram()`。
 
 `%` 系の API は版によって割合(0-1)と %(0-100) のどちらも返しうるため、`1.0 以下なら割合とみなして ×100` で正規化している（`reactor.lua` の `toPct`）。
 

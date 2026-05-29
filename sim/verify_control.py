@@ -26,12 +26,13 @@ lua.globals().REACTOR = Reactor
 #         burn<=cap で coolant 回復。= 「復水が追いつかない」現象を再現。
 harness = r"""
 local cfg, Reactor = CFG, REACTOR
+cfg.control.targetBurnRate = TARGET   -- nil なら config の fraction を使用
 local applied = { rate = 0 }
 local mock = { setBurnRate = function(x) applied.rate = x end }
 local self = setmetatable({ dev = mock }, { __index = Reactor })
 
 local maxBurn   = 1000
-local coolingCap = 220      -- この burn を超えると復水が追いつかない
+local coolingCap = 220      -- この burn を超えると復水が追いつかない（崖）
 local temp, coolant, heated, burn = 350, 100, 0, 0
 local out = {}
 local function clamp(v,a,b) if v<a then return a elseif v>b then return b end return v end
@@ -77,8 +78,16 @@ out[#out+1] = string.format("final: burn=%.1f T=%.0f cool=%.1f heat=%.1f (coolin
 return table.concat(out, "\n")
 """
 
-print(f"profile={cfg.profile}  target={cfg.control.targetTemp}  scram={cfg.safety.scramTemp}")
-print(f"riseGain={cfg.control.riseGain} maxRiseFraction={cfg.control.maxRiseFraction} "
-      f"trendTol={cfg.control.coolingTrendTol} tick={cfg.tickInterval}")
-print("-" * 70)
-print(lua.execute(harness))
+print(f"profile={cfg.profile}  scram={cfg.safety.scramTemp}  softTemp={cfg.control.softTemp}")
+print(f"maxRiseFraction={cfg.control.maxRiseFraction} maxFallFraction={cfg.control.maxFallFraction} "
+      f"coolantTarget={cfg.control.coolantTargetPct} tick={cfg.tickInterval}")
+
+for label, target in [
+    ("A) 目標=config(maxの10%=100)。持続可能内 → 保持できるか", None),
+    ("B) 目標=350（持続可能220を超過）。安全層が頭打ちにして溶けないか", 350),
+]:
+    print("=" * 78)
+    print(label)
+    print("-" * 78)
+    lua.globals().TARGET = target
+    print(lua.execute(harness))

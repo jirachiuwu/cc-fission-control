@@ -156,100 +156,72 @@ function Reactor:activate()
   return self:call("activate")
 end
 
--- 安全側の自動制御（オーバーシュート＝熱の遅れで行き過ぎる事故への対策）:
---   1. 緊急: 温度がソフト上限 or 「上昇率から予測した lookahead 秒先」が scram 超え
---            → burn を半減して叩き落とす（hard scram に到達させない）
---   2. 非対称: 上げは控えめ（maxRiseFraction）、下げは強め（maxFallFraction）
---   3. 予測: このまま上げると目標を超えそうなら、目標未満でも上げを止める（WAIT）
+-- 自動制御 v2（崖を探らない＝設定した安全 burn rate を保持 + 異常時のみ降圧）:
+--   通常: 設定した目標 burn rate（targetBurnRate / targetBurnFraction）まで緩やかに上げて保持。
+--   安全（降圧のみ。温度は限界探しに使わず安全装置として使う）:
+--     COOL!     温度がソフト上限 or 予測 scram 超え → 半減
+--     COOL-SAT  冷却フロア割れ / 急速悪化（タービン詰まり等で一気に dry out する崖の保険）→ 強降圧
+--     EASE      クーラント残量が目標を下回る → 緩降圧で持続可能側へ
+--     THROTTLE  タービン満タン → 降圧
 -- 戻り値: 制御内容を表す ASCII 文字列（画面で可視化）。
 function Reactor:autoAdjust(r, cfg, turbineEnergyPct)
   local c = cfg.control
   if not c.enabled then return "AUTO off" end
   if r.temp == nil or r.burnRate == nil or r.maxBurn == nil then return "AUTO: no data" end
 
-  -- 周期（秒）。ゲイン/上限は「毎秒」基準なので dt で実 tick 量にスケールする
-  -- （tickInterval を変えても実時間の挙動が変わらない）。
   local dt = cfg.tickInterval or 1
-
-  -- 温度上昇率（K/秒）。初回は 0。1tick の差分を dt で割って毎秒に正規化。
-  local ratePerSec = (r.temp - (self._lastTemp or r.temp)) / dt
+  local ratePerSec = (r.temp - (self._lastTemp or r.temp)) / dt  -- 温度上昇率 K/秒
   self._lastTemp = r.temp
+  local rate = ratePerSec
 
-  local hardMax   = r.maxBurn * c.maxBurnRateFraction
-  local scramTemp = cfg.safety.scramTemp
-  local predicted = r.temp + ratePerSec * (c.lookahead or 0)  -- lookahead 秒先の予測温度
-  local rate = ratePerSec  -- 表示用（dT/秒）
+  local hardMax  = r.maxBurn * c.maxBurnRateFraction
+  local riseStep = r.maxBurn * c.maxRiseFraction * dt
+  local fallStep = r.maxBurn * c.maxFallFraction * dt
+  local predicted = r.temp + ratePerSec * (c.lookahead or 0)
 
-  local function set(newRate, fmt, ...)
-    -- burn rate を maxBurn の burnStepPct% 刻みに丸める（粗く・安定。±半刻みのヒステリシス）。
-    local unit = r.maxBurn * ((c.burnStepPct or 0) / 100)
-    if unit > 0 then newRate = math.floor(newRate / unit + 0.5) * unit end
+  -- 冷却トレンド（急速悪化の保険用）。EMA で平滑化。
+  local cP, hP = r.coolantPct, r.heatedPct
+  self._cRate = (self._cRate or 0) * 0.6 + ((cP and (cP - (self._lastCoolant or cP)) / dt) or 0) * 0.4
+  self._hRate = (self._hRate or 0) * 0.6 + ((hP and (hP - (self._lastHeated  or hP)) / dt) or 0) * 0.4
+  self._lastCoolant, self._lastHeated = cP, hP
+
+  local function set(newRate, fmt)
     if newRate < c.minBurnRate then newRate = c.minBurnRate end
     if newRate > hardMax then newRate = hardMax end
-    if math.abs(newRate - r.burnRate) > 1e-4 then
-      self:call("setBurnRate", newRate)
-    end
+    if math.abs(newRate - r.burnRate) > 1e-4 then self:call("setBurnRate", newRate) end
     return string.format(fmt, r.burnRate, newRate, r.temp, rate)
   end
 
-  -- 1) 緊急冷却: ソフト上限 or 予測が scram 超え → 半減で素早く叩き落とす
-  if r.temp >= c.softTemp or predicted >= scramTemp then
+  -- ===== 安全オーバーライド（下げる方向のみ）=====
+  -- 1) 温度: ソフト上限 or 予測で scram 超え → 半減
+  if r.temp >= c.softTemp or predicted >= cfg.safety.scramTemp then
     return set(r.burnRate * 0.5, "COOL! %.1f->%.1f T=%.0f dT%+.0f")
   end
-
-  -- タービン満タン → 強めに絞る（毎秒上限 × dt）
+  -- 2) 冷却フロア割れ / 急速悪化（崖の保険）→ 強く下げる
+  if (cP and cP < c.coolantFloorPct) or (hP and hP > c.heatedCeilPct)
+     or self._cRate < -c.coolingTrendFast or self._hRate > c.coolingTrendFast then
+    return set(r.burnRate - fallStep, "COOL-SAT %.1f->%.1f T=%.0f dT%+.0f")
+  end
+  -- 3) クーラント残量が目標未満 → 緩降圧（持続可能側へ戻す）
+  if (cP and cP < c.coolantTargetPct) or (hP and hP > c.heatedTargetPct) then
+    return set(r.burnRate - riseStep, "EASE %.1f->%.1f T=%.0f dT%+.0f")
+  end
+  -- 4) タービン満タン → 下げる
   if cfg.turbine and cfg.turbine.enabled and turbineEnergyPct ~= nil
      and turbineEnergyPct >= cfg.turbine.throttleAtPct then
-    return set(r.burnRate - r.maxBurn * c.maxFallFraction * dt, "THROTTLE %.1f->%.1f T=%.0f dT%+.0f")
+    return set(r.burnRate - fallStep, "THROTTLE %.1f->%.1f T=%.0f dT%+.0f")
   end
 
-  -- 冷却の追従を「変化率（トレンド）」で見る。復水は待てば追いつくので、減った量でなく
-  -- 「減り続けているか」を判定する。ノイズ低減のため平滑化（EMA）する。
-  local cP, hP = r.coolantPct, r.heatedPct
-  local cRate = cP and ((cP - (self._lastCoolant or cP)) / dt) or 0  -- %/秒（+で増加）
-  local hRate = hP and ((hP - (self._lastHeated  or hP)) / dt) or 0
-  self._lastCoolant, self._lastHeated = cP, hP
-  self._cRate = (self._cRate or 0) * 0.6 + cRate * 0.4
-  self._hRate = (self._hRate or 0) * 0.6 + hRate * 0.4
-
-  -- 急速悪化（過渡）/ フロア割れ → 温度に関係なく強く下げる（暴走の本命対策）
-  local coolingFast  = (self._cRate < -c.coolingTrendFast) or (self._hRate > c.coolingTrendFast)
-  local coolingFloor = (cP and cP < c.coolantFloorPct) or (hP and hP > c.heatedCeilPct)
-  if coolingFloor or coolingFast then
-    local step = r.maxBurn * c.maxFallFraction * dt
-    return set(r.burnRate - step, "COOL-SAT %.1f->%.1f T=%.0f dT%+.0f")
+  -- ===== 通常: 設定した目標 burn rate へ緩やかにランプして保持 =====
+  local desired = c.targetBurnRate or (r.maxBurn * c.targetBurnFraction)
+  if desired > hardMax then desired = hardMax end
+  local eps = riseStep * 0.5
+  if r.burnRate < desired - eps then
+    return set(math.min(desired, r.burnRate + riseStep), "RAISE %.1f->%.1f T=%.0f dT%+.0f")
+  elseif r.burnRate > desired + eps then
+    return set(math.max(desired, r.burnRate - fallStep), "LOWER %.1f->%.1f T=%.0f dT%+.0f")
   end
-
-  -- クーラント残量が目標を下回る（= 冷却が追いついていない）→ 温度に関係なく緩やかに下げ、
-  -- 目標残量に戻す。復水が追いつけば残量が回復し、下の温度制御がまた上げる＝持続可能点に張り付く。
-  local coolingBelow = (cP and cP < c.coolantTargetPct) or (hP and hP > c.heatedTargetPct)
-  if coolingBelow then
-    local step = r.maxBurn * c.maxRiseFraction * dt   -- 上げと同じ緩やかさで下げる
-    return set(r.burnRate - step, "EASE %.1f->%.1f T=%.0f dT%+.0f")
-  end
-
-  local err = c.targetTemp - r.temp
-  if math.abs(err) <= c.tempDeadband then
-    return string.format("HOLD %.1f T=%.0f dT%+.0f", r.burnRate, r.temp, rate)
-  end
-
-  if err > 0 then
-    -- 予測で目標を超えそうなら上げない（オーバーシュート防止）
-    if predicted >= c.targetTemp then
-      return string.format("WAIT %.1f T=%.0f dT%+.0f", r.burnRate, r.temp, rate)
-    end
-    -- ゲイン/上限は毎秒基準なので dt を掛けて 1tick 分にする
-    local step = (err / c.targetTemp) * r.maxBurn * c.riseGain * dt
-    local cap  = r.maxBurn * c.maxRiseFraction * dt
-    if step > cap then step = cap end
-    return set(r.burnRate + step, "RAISE %.1f->%.1f T=%.0f dT%+.0f")
-  else
-    -- 下げる: 強め（毎秒基準 × dt）
-    local step = (err / c.targetTemp) * r.maxBurn * c.fallGain * dt   -- 負の値
-    local cap  = r.maxBurn * c.maxFallFraction * dt
-    if step < -cap then step = -cap end
-    return set(r.burnRate + step, "LOWER %.1f->%.1f T=%.0f dT%+.0f")
-  end
+  return string.format("HOLD %.1f/%.0f T=%.0f dT%+.0f", r.burnRate, desired, r.temp, rate)
 end
 
 Reactor.toPct = toPct
