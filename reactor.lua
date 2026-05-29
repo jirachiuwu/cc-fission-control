@@ -148,40 +148,47 @@ end
 -- 安全側に倒すため、増やす前に必ず炉の上限でクランプする。
 -- turbineEnergyPct（0-100、無ければ nil）が throttle 閾値以上なら、温度に余裕があっても
 -- 出力を上げず下げる（蒸気の行き場が無く逆流→過熱を未然に防ぐ）。
--- 戻り値: 制御内容を表す ASCII 文字列（画面に出して「効いてる」のを可視化する）。
+-- 比例制御: 目標温度からの誤差に比例して burn rate を増減する。
+-- ズレが大きいほど大きく動くので速く収束する（固定小ステップだと巨大炉で遅すぎた）。
+-- 1tick の変化幅は maxStepFraction で制限し、行き過ぎ・発振を防ぐ。
+-- 戻り値: 制御内容を表す ASCII 文字列（画面で「効いてる」のを可視化する）。
 function Reactor:autoAdjust(r, cfg, turbineEnergyPct)
   local c = cfg.control
   if not c.enabled then return "AUTO off" end
   if r.temp == nil or r.burnRate == nil or r.maxBurn == nil then return "AUTO: no data" end
 
   local hardMax = r.maxBurn * c.maxBurnRateFraction
-  local newRate = r.burnRate
-  local action
+  local maxStep = r.maxBurn * c.maxStepFraction
+  local newRate, action
 
   local turbineFull = (cfg.turbine and cfg.turbine.enabled
       and turbineEnergyPct ~= nil and turbineEnergyPct >= cfg.turbine.throttleAtPct)
 
   if turbineFull then
-    newRate = r.burnRate - c.rateStep      -- タービン満タン → 行き場なし、出力を絞る
+    -- タービン満タン → 行き場なし。最大ステップで素早く絞る。
+    newRate = r.burnRate - maxStep
     action = "THROTTLE"
-  elseif r.temp > c.targetTemp + c.tempDeadband then
-    newRate = r.burnRate - c.rateStep      -- 熱すぎる → 出力を下げる
-    action = "LOWER"
-  elseif r.temp < c.targetTemp - c.tempDeadband then
-    newRate = r.burnRate + c.rateStep      -- 余裕あり → 出力を上げる
-    action = "RAISE"
   else
-    return string.format("HOLD burn=%.1f", r.burnRate)  -- デッドバンド内 → 触らない
+    local err = c.targetTemp - r.temp            -- + = 上げる余地, - = 熱すぎる
+    if math.abs(err) <= c.tempDeadband then
+      return string.format("HOLD %.1f T=%.0f", r.burnRate, r.temp)
+    end
+    -- 誤差割合 × 炉の最大burn × aggressiveness（誤差大 → 大きく動く）
+    local step = (err / c.targetTemp) * r.maxBurn * c.aggressiveness
+    if step >  maxStep then step =  maxStep end  -- 1tick の上限でクランプ
+    if step < -maxStep then step = -maxStep end
+    newRate = r.burnRate + step
+    action = (err > 0) and "RAISE" or "LOWER"
   end
 
   if newRate < c.minBurnRate then newRate = c.minBurnRate end
   if newRate > hardMax then newRate = hardMax end
 
-  if math.abs(newRate - r.burnRate) > 1e-6 then
+  if math.abs(newRate - r.burnRate) > 1e-4 then
     self:call("setBurnRate", newRate)
-    return string.format("%s %.1f->%.1f", action, r.burnRate, newRate)
+    return string.format("%s %.1f->%.1f T=%.0f", action, r.burnRate, newRate, r.temp)
   end
-  return string.format("%s (limit %.1f)", action, newRate)
+  return string.format("%s hold %.1f T=%.0f", action, newRate, r.temp)
 end
 
 Reactor.toPct = toPct

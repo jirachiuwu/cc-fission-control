@@ -48,8 +48,12 @@ local cfg = {
   control = {
     enabled             = true,
     targetTemp          = 1100, -- profiles で上書きされる（フォールバック値）
-    tempDeadband        = 20,   -- K: 目標±この範囲は触らない（発振=ハンチング防止）
-    rateStep            = 0.5,  -- mB/t: 1サイクルあたりの増減幅
+    tempDeadband        = 15,   -- K: 目標±この範囲は触らない（発振=ハンチング防止）
+    -- 比例制御: 温度誤差の割合 × 炉の最大burn × aggressiveness = 1tick の増減量。
+    -- 誤差が大きいほど大きく動くので速く収束する。大きいほど機敏だが行き過ぎやすい。
+    aggressiveness      = 0.6,
+    -- 1tick の増減を「炉の最大burn × これ」までに制限（暴れ・行き過ぎ防止の上限）。
+    maxStepFraction     = 0.34,
     minBurnRate         = 0.1,  -- mB/t: 自動制御時の下限
     maxBurnRateFraction = 1.0,  -- 炉の上限(=燃料集合体数)に対する割合上限
   },

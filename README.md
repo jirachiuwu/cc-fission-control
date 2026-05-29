@@ -153,6 +153,26 @@ fission
 | `turbine.throttleAtPct` | 99 | タービンエネルギーがこれ以上なら出力を絞る（%）|
 | `turbine.required` | false | true でタービン未検出時に起動中止 |
 
+## 自動制御の速さ / チューニング
+
+制御は **`tickInterval` 秒ごと（既定 1 秒）に 1 回**判定する。各回の burn rate 調整は固定値ではなく**比例制御**:
+
+```
+増減量 = (目標温度 - 現在温度) / 目標温度 × 炉の最大burn × aggressiveness
+        （ただし 1tick あたり 炉の最大burn × maxStepFraction まで）
+```
+
+つまり**目標から遠いほど大きく動く**ので、最大 burn rate が大きい巨大炉でも数秒で目標に寄る（旧版は固定 0.5 mB/t ずつで激遅だった）。
+
+| キー | 既定 | 説明 |
+|---|---|---|
+| `control.aggressiveness` | 0.6 | 大きいほど機敏。行き過ぎ/発振するなら下げる |
+| `control.maxStepFraction` | 0.34 | 1 秒あたりの最大変化を「炉最大burn × これ」に制限 |
+| `control.tempDeadband` | 15 | 目標±この範囲は触らない（発振防止）|
+| `tickInterval` | 1 | 制御の周期（秒）。下げるとより機敏（温度の追従遅れに注意）|
+
+> 温度が目標の周りで振動する場合は `aggressiveness` か `maxStepFraction` を下げる。もっと機敏にしたいなら上げる。
+
 ## 仕組み
 
 `peripheral.find("fissionReactorLogicAdapter")`（取れなければ `getTemperature` を持つ機器を総当たり）でアダプタを掴み、毎サイクル `getTemperature` / `getDamagePercent` / `get*FilledPercentage` 等を読む。安全判定を通れば、目標温度との差分で `setBurnRate` を比例調整。危険なら `scram()`。
