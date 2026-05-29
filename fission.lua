@@ -228,10 +228,22 @@ end
 local okRun, err = pcall(main)
 
 reactor:scram()
-if out.setBackgroundColor then out.setBackgroundColor(colors.black) end
-if out.clear then out.clear() end
-if out.setCursorPos then out.setCursorPos(1, 1) end
-print("fission-control stopped. Reactor SCRAMmed for safety.")
-if not okRun then
-  print("error: " .. tostring(err))
+
+-- 終了/エラーをコンピュータ端末とモニターの「両方」に出す
+-- （モニターだけ見ていてクラッシュに気づけない問題を防ぐ）。
+local function report(o)
+  if not o then return end
+  if o.setBackgroundColor then o.setBackgroundColor(colors.black) end
+  if o.setTextColor then o.setTextColor(colors.white) end
+  if o.clear then o.clear() end
+  if o.setCursorPos then o.setCursorPos(1, 1) end
+  o.write("fission-control stopped. Reactor SCRAMmed.")
+  if not okRun then
+    if o.setCursorPos then o.setCursorPos(1, 3) end
+    if o.setTextColor then o.setTextColor(colors.red) end
+    o.write("ERROR: " .. tostring(err))
+  end
 end
+
+report(term)
+if out ~= term then report(out) end
