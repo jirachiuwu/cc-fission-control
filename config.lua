@@ -57,11 +57,14 @@ local cfg = {
     lookahead           = 4,
 
     -- 非対称制御（毎秒あたりの強さ。tickInterval で自動スケール＝周期を変えても挙動同じ）。
-    -- 上げは控えめ、下げは強め（加熱は慎重、冷却は全力＝原発の鉄則）。
-    riseGain            = 0.20, -- 上げの比例ゲイン（毎秒）
-    maxRiseFraction     = 0.08, -- 上げ上限 = maxBurn × これ /秒（ゆっくり上げる）
-    fallGain            = 1.0,  -- 下げの比例ゲイン（上げより強い、毎秒）
-    maxFallFraction     = 0.5,  -- 下げ上限 = maxBurn × これ /秒
+    -- 上げは「ごく控えめ」、下げは強め（加熱は慎重、冷却は全力＝原発の鉄則）。
+    -- ※上げ幅は maxBurn に対する割合。大型炉（例 max 1000）だと割合が大きいと一気に
+    --   冷却を超えて即爆発するので、上げ上限は小さめ（既定 0.5%/秒）が安全。
+    --   小型炉で遅すぎると感じたら maxRiseFraction を上げる。冷却が追いつかず溶けるなら下げる。
+    riseGain            = 0.10,  -- 上げの比例ゲイン（毎秒）
+    maxRiseFraction     = 0.005, -- 上げ上限 = maxBurn × これ /秒（max1000 なら 5 mB/t/秒）
+    fallGain            = 1.0,   -- 下げの比例ゲイン（上げより強い、毎秒）
+    maxFallFraction     = 0.5,   -- 下げ上限 = maxBurn × これ /秒
 
     minBurnRate         = 0.0,  -- mB/t: 自動制御時の下限（0 まで絞れる）
     maxBurnRateFraction = 1.0,  -- 炉の上限(=燃料集合体数)に対する割合上限
