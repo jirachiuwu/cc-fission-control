@@ -148,47 +148,66 @@ end
 -- 安全側に倒すため、増やす前に必ず炉の上限でクランプする。
 -- turbineEnergyPct（0-100、無ければ nil）が throttle 閾値以上なら、温度に余裕があっても
 -- 出力を上げず下げる（蒸気の行き場が無く逆流→過熱を未然に防ぐ）。
--- 比例制御: 目標温度からの誤差に比例して burn rate を増減する。
--- ズレが大きいほど大きく動くので速く収束する（固定小ステップだと巨大炉で遅すぎた）。
--- 1tick の変化幅は maxStepFraction で制限し、行き過ぎ・発振を防ぐ。
--- 戻り値: 制御内容を表す ASCII 文字列（画面で「効いてる」のを可視化する）。
+-- 安全側の自動制御（オーバーシュート＝熱の遅れで行き過ぎる事故への対策）:
+--   1. 緊急: 温度がソフト上限 or 「上昇率から予測した lookahead 秒先」が scram 超え
+--            → burn を半減して叩き落とす（hard scram に到達させない）
+--   2. 非対称: 上げは控えめ（maxRiseFraction）、下げは強め（maxFallFraction）
+--   3. 予測: このまま上げると目標を超えそうなら、目標未満でも上げを止める（WAIT）
+-- 戻り値: 制御内容を表す ASCII 文字列（画面で可視化）。
 function Reactor:autoAdjust(r, cfg, turbineEnergyPct)
   local c = cfg.control
   if not c.enabled then return "AUTO off" end
   if r.temp == nil or r.burnRate == nil or r.maxBurn == nil then return "AUTO: no data" end
 
-  local hardMax = r.maxBurn * c.maxBurnRateFraction
-  local maxStep = r.maxBurn * c.maxStepFraction
-  local newRate, action
+  -- 温度上昇率（K/tick）。初回は 0。
+  local rate = r.temp - (self._lastTemp or r.temp)
+  self._lastTemp = r.temp
 
-  local turbineFull = (cfg.turbine and cfg.turbine.enabled
-      and turbineEnergyPct ~= nil and turbineEnergyPct >= cfg.turbine.throttleAtPct)
+  local hardMax   = r.maxBurn * c.maxBurnRateFraction
+  local scramTemp = cfg.safety.scramTemp
+  local predicted = r.temp + rate * (c.lookahead or 0)
 
-  if turbineFull then
-    -- タービン満タン → 行き場なし。最大ステップで素早く絞る。
-    newRate = r.burnRate - maxStep
-    action = "THROTTLE"
-  else
-    local err = c.targetTemp - r.temp            -- + = 上げる余地, - = 熱すぎる
-    if math.abs(err) <= c.tempDeadband then
-      return string.format("HOLD %.1f T=%.0f", r.burnRate, r.temp)
+  local function set(newRate, fmt, ...)
+    if newRate < c.minBurnRate then newRate = c.minBurnRate end
+    if newRate > hardMax then newRate = hardMax end
+    if math.abs(newRate - r.burnRate) > 1e-4 then
+      self:call("setBurnRate", newRate)
     end
-    -- 誤差割合 × 炉の最大burn × aggressiveness（誤差大 → 大きく動く）
-    local step = (err / c.targetTemp) * r.maxBurn * c.aggressiveness
-    if step >  maxStep then step =  maxStep end  -- 1tick の上限でクランプ
-    if step < -maxStep then step = -maxStep end
-    newRate = r.burnRate + step
-    action = (err > 0) and "RAISE" or "LOWER"
+    return string.format(fmt, r.burnRate, newRate, r.temp, rate)
   end
 
-  if newRate < c.minBurnRate then newRate = c.minBurnRate end
-  if newRate > hardMax then newRate = hardMax end
-
-  if math.abs(newRate - r.burnRate) > 1e-4 then
-    self:call("setBurnRate", newRate)
-    return string.format("%s %.1f->%.1f T=%.0f", action, r.burnRate, newRate, r.temp)
+  -- 1) 緊急冷却: ソフト上限 or 予測が scram 超え → 半減で素早く叩き落とす
+  if r.temp >= c.softTemp or predicted >= scramTemp then
+    return set(r.burnRate * 0.5, "COOL! %.1f->%.1f T=%.0f dT%+.0f")
   end
-  return string.format("%s hold %.1f T=%.0f", action, newRate, r.temp)
+
+  -- タービン満タン → 強めに絞る
+  if cfg.turbine and cfg.turbine.enabled and turbineEnergyPct ~= nil
+     and turbineEnergyPct >= cfg.turbine.throttleAtPct then
+    return set(r.burnRate - r.maxBurn * c.maxFallFraction, "THROTTLE %.1f->%.1f T=%.0f dT%+.0f")
+  end
+
+  local err = c.targetTemp - r.temp
+  if math.abs(err) <= c.tempDeadband then
+    return string.format("HOLD %.1f T=%.0f dT%+.0f", r.burnRate, r.temp, rate)
+  end
+
+  if err > 0 then
+    -- 上げる: 予測で目標を超えそうなら上げない（オーバーシュート防止）
+    if predicted >= c.targetTemp then
+      return string.format("WAIT %.1f T=%.0f dT%+.0f", r.burnRate, r.temp, rate)
+    end
+    local step = (err / c.targetTemp) * r.maxBurn * c.riseGain
+    local cap  = r.maxBurn * c.maxRiseFraction
+    if step > cap then step = cap end
+    return set(r.burnRate + step, "RAISE %.1f->%.1f T=%.0f dT%+.0f")
+  else
+    -- 下げる: 強め
+    local step = (err / c.targetTemp) * r.maxBurn * c.fallGain   -- 負の値
+    local cap  = r.maxBurn * c.maxFallFraction
+    if step < -cap then step = -cap end
+    return set(r.burnRate + step, "LOWER %.1f->%.1f T=%.0f dT%+.0f")
+  end
 end
 
 Reactor.toPct = toPct

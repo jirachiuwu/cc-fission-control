@@ -21,10 +21,11 @@ local cfg = {
   ---------------------------------------------------------------------------
   profile = "balance",
 
+  -- ダメージ開始 1200K に対しマージン厚め。scram はその手前、softTemp はさらに手前。
   profiles = {
-    safety      = { targetTemp = 1000, scramTemp = 1150 },
-    balance     = { targetTemp = 1100, scramTemp = 1180 },
-    performance = { targetTemp = 1150, scramTemp = 1190 },
+    safety      = { targetTemp = 850,  scramTemp = 1050 },
+    balance     = { targetTemp = 1000, scramTemp = 1150 },
+    performance = { targetTemp = 1100, scramTemp = 1175 },
   },
 
   ---------------------------------------------------------------------------
@@ -47,14 +48,21 @@ local cfg = {
   ---------------------------------------------------------------------------
   control = {
     enabled             = true,
-    targetTemp          = 1100, -- profiles で上書きされる（フォールバック値）
-    tempDeadband        = 15,   -- K: 目標±この範囲は触らない（発振=ハンチング防止）
-    -- 比例制御: 温度誤差の割合 × 炉の最大burn × aggressiveness = 1tick の増減量。
-    -- 誤差が大きいほど大きく動くので速く収束する。大きいほど機敏だが行き過ぎやすい。
-    aggressiveness      = 0.6,
-    -- 1tick の増減を「炉の最大burn × これ」までに制限（暴れ・行き過ぎ防止の上限）。
-    maxStepFraction     = 0.34,
-    minBurnRate         = 0.1,  -- mB/t: 自動制御時の下限
+    targetTemp          = 1000, -- profiles で上書き
+    softTemp            = 1075, -- profiles から自動計算で上書き（target と scram の中間）
+    tempDeadband        = 10,   -- K: 目標±この範囲は触らない（発振防止）
+
+    -- 予測: 温度上昇率からこの秒数先を予測し、目標/上限を超えそうなら手前で上げを止める。
+    -- オーバーシュート（熱の遅れで行き過ぎる）防止の核。
+    lookahead           = 4,
+
+    -- 非対称制御: 上げは控えめ、下げは強め（加熱は慎重、冷却は全力＝原発の鉄則）。
+    riseGain            = 0.20, -- 上げの比例ゲイン
+    maxRiseFraction     = 0.08, -- 1tick の上げ上限 = maxBurn × これ（ゆっくり上げる）
+    fallGain            = 1.0,  -- 下げの比例ゲイン（上げより強い）
+    maxFallFraction     = 0.5,  -- 1tick の下げ上限 = maxBurn × これ
+
+    minBurnRate         = 0.0,  -- mB/t: 自動制御時の下限（0 まで絞れる）
     maxBurnRateFraction = 1.0,  -- 炉の上限(=燃料集合体数)に対する割合上限
   },
 
@@ -82,8 +90,10 @@ local cfg = {
 -- 選択プロファイルを安全/制御しきい値へ反映する（config が唯一の真実になるよう、ここで解決）。
 local p = cfg.profiles[cfg.profile]
 if p then
-  cfg.safety.scramTemp  = p.scramTemp
+  cfg.safety.scramTemp   = p.scramTemp
   cfg.control.targetTemp = p.targetTemp
+  -- ソフトリミット = target と scram の中間。ここで burn を半減して hard scram を避ける。
+  cfg.control.softTemp   = p.targetTemp + (p.scramTemp - p.targetTemp) * 0.5
 end
 
 return cfg
