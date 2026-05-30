@@ -223,18 +223,23 @@ function Reactor:autoAdjust(r, cfg, turbineEnergyPct)
     return apply(self._piOut - fallStep, "THROTTLE %.1f->%.1f T=%.0f dT%+.0f", true)
   end
 
-  -- ===== PI core: coolant を低い設定値に保つ → 理論上限の直下に張り付く =====
+  -- ===== PI core（二重制約）: coolant 下限 と heated 上限 の「先に効く方」で頭打ち =====
+  -- coolant 律速（冷却材供給不足）→ coolant が下限に達して止まる。
+  -- タービン律速（蒸気がタービンにパンパン→ボイラー水枯れ）→ heated（逆流蒸気）が上限に達して止まる。
+  -- どちらの炉構成でも「先に詰まる方」で安全に張り付き、パンパン/枯れに突っ込まない。
   if cP == nil then
     return string.format("HOLD %.1f T=%.0f (no coolant)", r.burnRate, r.temp)
   end
   local Ki  = r.maxBurn * c.piKiFraction
   local Kp  = r.maxBurn * c.piKpFraction
-  local err = cP - c.coolantSetpoint   -- >0 = coolant が設定値より上 = まだ攻める余地
+  local coolErr = cP - c.coolantSetpoint                       -- >0 = coolant に余裕
+  local heatErr = hP and (c.heatedSetpoint - hP) or 1e9        -- >0 = heated に余裕（読めなければ無制約）
+  local err = (coolErr < heatErr) and coolErr or heatErr        -- 余裕の小さい方＝先に効く制約
 
-  -- ★変化率ゲート: 設定値より下なら常に下げる。上なら「coolant が落ち着いている時だけ」上げる。
-  --   coolant が落下中（消費 > 復水で追いつき待ち）は積分を止めて HOLD ＝ 行き過ぎ（追加しすぎ）防止。
-  --   復水が追いついて落ち着いたら、また少し上げる ＝「状態を見ながらゆっくり上げる」の自動化。
-  if err < 0 or self._cRate >= -c.coolantSettleTol then
+  -- ★変化率ゲート: err<0 なら常に下げる。err>=0 でも「coolant 落下中 or heated 上昇中」は HOLD。
+  --   復水/蒸気処理の遅れで行き過ぎる（追加しすぎ）のを防ぐ＝落ち着いた時だけ少し上げる。
+  local settled = (self._cRate >= -c.coolantSettleTol) and (self._hRate <= c.coolantSettleTol)
+  if err < 0 or settled then
     self._piI = self._piI + Ki * err * dt
   end
   if self._piI < 0 then self._piI = 0 end

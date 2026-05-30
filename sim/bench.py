@@ -22,8 +22,9 @@ import sys, json
 from lupa import LuaRuntime
 
 cand_path = sys.argv[1]
-cap = int(sys.argv[2]) if len(sys.argv) > 2 else 600
+cap = int(sys.argv[2]) if len(sys.argv) > 2 else 600   # B0 = coolant runout 上限
 kSettle = float(sys.argv[3]) if len(sys.argv) > 3 else 0.15  # 復水の速さ（小さい=遅れ大）
+Bt = int(sys.argv[4]) if len(sys.argv) > 4 else 100000  # Bt = タービン上限（蒸気飽和）。小さい=タービン律速
 with open(cand_path, encoding="utf-8") as f:
     cand_src = f.read()
 
@@ -32,7 +33,7 @@ lua.execute(cand_src)
 
 MODEL = r"""
 local control = control
-local maxBurn, B0, dt = 1000, __CAP__, 0.5
+local maxBurn, B0, Bt, dt = 1000, __CAP__, __BT__, 0.5
 local kSettle = __KSETTLE__
 local temp, coolant, heated, burn = 350, 100, 0, 0
 local mem = {}
@@ -49,10 +50,14 @@ for t = 1, TICKS do
   if type(nb) ~= "number" then nb = burn end
   burn = clamp(nb, 0, maxBurn)
 
-  local Seq = clamp(100*(1 - burn/B0), 0, 100)        -- coolant 平衡（burn で減少）
-  local Heq = clamp((burn/B0)*40, 0, 100)             -- heated 平衡（burn で増加）
-  coolant = coolant + (Seq - coolant) * kSettle * dt  -- 一次遅れで追従
-  heated  = heated  + (Heq - heated)  * kSettle * dt
+  -- heated（加熱冷却材＝逆流蒸気）平衡: タービン上限 Bt に近づくほど上昇、Bt で 100% 飽和。
+  local Heq = clamp(100 * burn / Bt, 0, 100)
+  heated = heated + (Heq - heated) * kSettle * dt
+  -- coolant 平衡: burn で減少。さらに heated が高い（タービン詰まり→ボイラー水枯れ）と
+  -- 復水が止まり coolant が道連れで落ちる（backup ペナルティ）。
+  local backup = (heated > 80) and (heated - 80) * 4 or 0
+  local Seq = clamp(100*(1 - burn/B0) - backup, 0, 100)
+  coolant = coolant + (Seq - coolant) * kSettle * dt
 
   local dT = burn*0.003*dt - (temp-350)*0.02*dt
   if coolant < 5 then dT = dT + burn*0.08*dt end       -- runout で冷却崩壊
@@ -70,7 +75,7 @@ return { melted=melted, maxBurnReached=maxBurnReached, ssMean=sum/n, ssP2P=mx-mn
          ssTemp=temp, ssCoolant=coolant, ssHeated=heated, B0=B0 }
 """
 
-res = lua.execute(MODEL.replace("__CAP__", str(cap)).replace("__KSETTLE__", str(kSettle)))
+res = lua.execute(MODEL.replace("__CAP__", str(cap)).replace("__KSETTLE__", str(kSettle)).replace("__BT__", str(Bt)))
 print(json.dumps({
     "candidate": cand_path, "B0": cap,
     "melted": bool(res["melted"]),
