@@ -4,7 +4,7 @@
 
 local cfg = {
   -- バージョン表示。再インストール後にヘッダのこの番号が一致すれば「最新が動いてる」と確認できる。
-  version = "b13",
+  version = "b14",
 
   -- ロジックアダプタの周辺機器名。nil なら自動検出（型名 or getTemperature を持つ機器を総当たり）。
   adapterName = nil,
@@ -39,46 +39,49 @@ local cfg = {
   safety = {
     scramTemp           = 1180, -- profiles で上書きされる（フォールバック値）
     scramDamagePct      = 1.0,  -- %: ダメージがこれを超えたらSCRAM
-    minCoolantPct       = 25,   -- %: 冷却材がこれ未満でSCRAM
+    -- ※実機は coolant が常時循環して 7〜15% 程度で運転する（循環で減るのは正常）。
+    -- SCRAM 閾値は運転点(coolantSetpoint=12)・COOL-SAT フロア(5)より下の「runout 直前」に置く。
+    minCoolantPct       = 3,    -- %: 冷却材がこれ未満（runout 直前）でSCRAM
     maxHeatedCoolantPct = 95,   -- %: 加熱冷却材の出口が詰まりかけでSCRAM（最後の砦）
     maxWastePct         = 92,   -- %: 廃棄物タンクが満杯近くでSCRAM
     minFuelPct          = 1,    -- %: 燃料切れでSCRAM
   },
 
   ---------------------------------------------------------------------------
-  -- 自動出力制御（設計思想 v3 = auto-seek）:
-  --   炉ごとの「捌ける最大 burn（理論上限）」を信号から自動発見して、その直下に滑らかに張り付く。
-  --   仕組み: coolant を安全ゾーン(≈100%)に保ったまま境界をなぞる。上限以下は coolant=100 で
-  --   信号が出ない＝余裕あり→ゆっくり攻める。境界を越えると coolant が下がり heated が上がる
-  --   →即引く（非対称: 引きは攻めより速い）。＝目標値を手で設定しなくても理論上限まで自動で上がる。
-  --   設計はシミュレーター（sim/）で 6 戦略を競わせ、隠し上限 250-950 全てで到達率≈100% かつ
-  --   波 P2P<9・溶融ゼロを確認した方式を採用。温度/冷却フロア/タービンはハード安全層（下げのみ）。
+  -- 自動出力制御（設計思想 v4 = PI on coolant、実機の循環物理に合わせて再設計）:
+  --   実機: coolant は常に循環し、burn を上げるほど表示 % が下がって各点で安定する（循環で減るのは正常）。
+  --   本当の限界(runout)は coolant が循環予備すら維持できず 0 へ向かう時。
+  --   → coolant を「低い設定値 coolantSetpoint(既定 12%)」に PI 制御で保てば、burn が自動で
+  --      「coolant がその予備分になる点」= 理論上限の直下まで上がって張り付く。
+  --   ★出力をもっと攻めたい → coolantSetpoint を下げる（例 8）。安全マージン厚く → 上げる（例 20）。
+  --   設計は循環物理モデル（sim/）で複数 runout 上限を検証。全上限で coolant=設定値に張り付き、
+  --   burn が runout の ~88%（持続可能最大）、波ゼロ、溶融ゼロを確認。
   ---------------------------------------------------------------------------
   control = {
     enabled             = true,
 
-    -- auto-seek 本体（速度は全て maxBurn の割合なので炉サイズに依らない）。
-    -- coolant がこれ以上 & heated がこれ以下 = 余裕あり（安全ゾーン）→ 攻める。
-    coolantHealthyPct   = 99.5,
-    heatedHealthyPct    = 0.5,
-    seekUpFraction      = 0.003,  -- 攻める速さ = maxBurn × これ /秒（max1000 で 3/秒、控えめ＝滑らか）
-    seekBrakePct        = 99.95,  -- coolant がこれ未満（=境界直下）なら攻めを弱める
-    seekBrakeFactor     = 0.25,   -- 境界直下での攻め係数（オーバーシュート抑制）
-    seekDownFraction    = 0.0015, -- ストレス時の引き = maxBurn × これ × stress /秒（非対称・速い）
-    seekBackoffFraction = 0.0003, -- 引きの微小固定分 = maxBurn × これ /秒
+    -- ★最重要★ coolant をこの % に保つよう burn を自動調整。低いほど高出力（runout に近い）。
+    -- 自分の炉で手動運転時に coolant が安定する低い値の少し上に設定するのが安全（実機は 7〜15% 程度）。
+    coolantSetpoint     = 12,
+
+    -- PI ゲイン（maxBurn の割合なので炉サイズに依らない）。通常いじらない。
+    piKiFraction        = 0.0008, -- 積分ゲイン（定常で coolant を設定値ぴったりに合わせる主役）
+    piKpFraction        = 0.002,  -- 比例ゲイン（過渡のダンピング）
+    piUpSlewFraction    = 0.006,  -- 上げの最大速度 = maxBurn × これ /秒（起動オーバーシュート防止、控えめ）
+    piDownSlewFraction  = 0.10,   -- 下げの最大速度 = maxBurn × これ /秒（下げは速くて安全）
 
     -- 安全装置（温度）。softTemp/scramTemp は profiles から決まる。
-    softTemp            = 1075, -- profiles から自動計算で上書き（target と scram の中間）
+    softTemp            = 1075, -- profiles から自動計算で上書き
     lookahead           = 4,    -- 秒: 温度上昇率からこの秒数先を予測（オーバーシュート安全側）
 
-    maxFallFraction     = 0.5,  -- ハード安全降圧の速さ上限 = maxBurn × これ /秒（下げは速くて安全）
+    maxFallFraction     = 0.5,  -- ハード安全降圧の速さ上限 = maxBurn × これ /秒
     minBurnRate         = 0.0,  -- mB/t: 下限
-    maxBurnRateFraction = 1.0,  -- 炉の上限に対する割合上限（auto-seek もこれで頭打ち＝手動キャップにも使える）
+    maxBurnRateFraction = 1.0,  -- 炉の上限に対する割合上限（手動キャップにも使える）
 
-    -- ハード安全層（最終手前ガード）。scram(25/95) の手前で踏みとどまる。
-    coolantFloorPct   = 40,   -- coolant がこれ未満 → 強く降圧（COOL-SAT）
-    heatedCeilPct     = 60,   -- heated がこれ超 → 強く降圧
-    coolingTrendFast  = 3.0,  -- %/秒: 急速に悪化（崖の入り口）→ 強く降圧
+    -- ハード安全層（最終手前ガード）。運転点（coolant≈設定値 / heated は高め）の外側に置く。
+    coolantFloorPct   = 5,    -- coolant がこれ未満（runout 直前）→ 強く降圧（COOL-SAT）
+    heatedCeilPct     = 80,   -- heated がこれ超 → 強く降圧（運転中 heated は数十%まで上がるので高めに）
+    coolingTrendFast  = 6.0,  -- %/秒: coolant がこの速さ以上で急落（runout への落下）→ 強く降圧
   },
 
   ---------------------------------------------------------------------------

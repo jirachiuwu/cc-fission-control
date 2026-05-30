@@ -153,38 +153,40 @@ fission
 | `turbine.throttleAtPct` | 99 | タービンエネルギーがこれ以上なら出力を絞る（%）|
 | `turbine.required` | false | true でタービン未検出時に起動中止 |
 
-## 自動制御の仕組み / チューニング（設計思想 v3 = auto-seek）
+## 自動制御の仕組み / チューニング（設計思想 v4 = PI on coolant）
 
-**炉ごとの「捌ける最大 burn（理論上限）」を信号から自動発見して、その直下に滑らかに張り付く。** 目標値を手で設定しなくていい。どの炉でも勝手に理論上限まで上がる。
+**炉ごとの理論上限を自動発見して、その直下に滑らかに張り付く。** 目標 burn を手で設定しなくていい。
 
-仕組み: **coolant を安全ゾーン(≈100%)に保ったまま境界をなぞる。**
-- 上限以下では coolant=100% に張り付く＝信号が出ない＝**余裕あり → ゆっくり攻める**（`SEEK+`）。境界直下（coolant が 100 からわずかに下降）では攻めを弱めてオーバーシュート抑制。
-- 境界を越えると coolant が下がり heated が上がる → **即引く**（`SEEK-`、非対称: 引きは攻めより速い）。
-- 結果、理論上限の**直下に張り付いて微小に上下するだけ**（波がごく小さい）。
+### 実機の物理（ここが肝）
+Mekanism の coolant は**常に循環**している。burn を上げるほど循環量が増え、**coolant タンクの表示 % は下がって各 burn である値に落ち着く**（循環で減るのは正常、容量が減ってるわけじゃない）。本当の限界(runout)は循環予備すら維持できず coolant が 0 へ向かう時。→「coolant が 99% 未満なら危険」みたいな高い閾値はナンセンス。
 
-**安全層（ハード・下げ方向のみ）**: `COOL!`（温度ソフト上限/予測scram→半減）/ `COOL-SAT`（冷却フロア割れ・**急速悪化＝崖の入り口を %/秒で検知**→強降圧）/ `THROTTLE`（タービン満タン→降圧）。
+### 制御
+**coolant を「低い設定値 `coolantSetpoint`（既定 12%）」に PI 制御で保つ。** すると burn が自動で「coolant がその予備分になる点」＝**理論上限の直下**まで上がって張り付く。coolant が設定値より上（循環に余裕）→ `SEEK+`、設定値ぴったり → `HOLD`、下 → `SEEK-`。起動オーバーシュートと波は slew リミッタ（上げ gentle・下げ速い）+ アンチワインドアップで抑制 → 定常は波ゼロ。
+
+**★出力をもっと攻めたい → `coolantSetpoint` を下げる（例 8）。安全マージンを厚く → 上げる（例 20）。** これが唯一の主ツマミ。
+
+**安全層（ハード・下げのみ）**: `COOL!`（温度→半減）/ `COOL-SAT`（coolant フロア割れ・heated 上限超・急落→強降圧）/ `THROTTLE`（タービン満タン）/ `SCRAM`（coolant < 3% 等の最終手前）。
 
 ### 設計の検証（シミュレーター）
-`sim/` に物理ベンチを構築し、**6 つの制御戦略を競わせて客観評価**した（`sim/bench.py` / `sim/bench_multi.py`）。勝者（採用方式）は **隠し上限 250/600/850/950 の全てで到達率 ≈ 100%（理論上限に張り付く）× 波 P2P < 9 × 溶融ゼロ**。実物 `reactor.lua` を物理モデルで回した統合テスト（`sim/verify_control.py`）でも別の上限で同等を確認。
+`sim/` に**実機の循環物理モデル**を構築（`sim/bench.py`）。複数の runout 上限で検証し、**全上限で coolant=設定値に張り付き・burn が runout の ~88%（持続可能最大）・波ゼロ・溶融ゼロ**を確認。実物 `reactor.lua` を循環モデルで回す統合テスト（`sim/verify_control.py`）でも、coolant が循環で下がりながら理論上限の直下に滑らかに張り付くこと・SCRAM 誤発振が無いことを確認。
 
 | キー | 既定 | 説明 |
 |---|---|---|
-| `control.coolantHealthyPct` / `heatedHealthyPct` | 99.5 / 0.5 | これより健全なら「余裕あり」と判断して攻める。**もっと安全マージンが欲しいなら coolantHealthy を上げる**（例 99.8）|
-| `control.seekUpFraction` | 0.003 | 攻める速さ（炉最大 /秒）。**もっと速く上限に着けたいなら上げる**（例 0.006）。波が出るなら下げる |
-| `control.seekDownFraction` / `seekBackoffFraction` | 0.0015 / 0.0003 | ストレス時の引きの強さ（炉最大基準）。非対称で攻めより速い |
-| `control.seekBrakePct` / `seekBrakeFactor` | 99.95 / 0.25 | 境界直下で攻めを弱める閾値と係数（オーバーシュート抑制）|
-| `control.maxBurnRateFraction` | 1.0 | 上限キャップ。**燃料節約等で出力を頭打ちにしたいなら下げる**（手動キャップにも使える）|
-| `control.softTemp` | (自動) | これ以上で burn 半減（profile から自動）|
-| `control.coolantFloorPct` / `heatedCeilPct` | 40 / 60 | 割ると `COOL-SAT` 強制降圧 |
-| `control.coolingTrendFast` | 3.0 | %/秒。**急速悪化（崖の入り口）で即 `COOL-SAT`** ＝最重要保険 |
-| `tickInterval` | 0.5 | 制御・描画の周期（秒）。2回/秒 |
+| **`control.coolantSetpoint`** | 12 | **★唯一の主ツマミ。coolant をこの % に保つよう burn を自動調整。低いほど高出力（runout に近い）。** 手動時に coolant が安定する低い値の少し上に |
+| `control.piKiFraction` / `piKpFraction` | 0.0008 / 0.002 | PI ゲイン（炉サイズ非依存）。通常いじらない |
+| `control.piUpSlewFraction` / `piDownSlewFraction` | 0.006 / 0.10 | 上げ/下げの最大速度（炉最大 /秒）。上げが遅ければ上げる |
+| `control.maxBurnRateFraction` | 1.0 | 上限キャップ（手動キャップにも使える）|
+| `control.coolantFloorPct` / `heatedCeilPct` | 5 / 80 | 割ると `COOL-SAT` 強制降圧（運転点 coolant≈設定値 / heated は数十% の外側に設定）|
+| `control.coolingTrendFast` | 6.0 | %/秒。coolant がこの速さ以上で急落→即 `COOL-SAT` |
+| `safety.minCoolantPct` | 3 | coolant がこれ未満（runout 直前）で SCRAM |
+| `tickInterval` | 0.5 | 制御・描画の周期（秒）|
 
-> **そのまま入れれば自動で理論上限まで上がって張り付く。** チューニング不要。もし張り付きが遅いと感じたら `seekUpFraction` を上げる、波が気になるなら下げる、安全マージンを厚くしたいなら `coolantHealthyPct` を上げる。
-> 画面右上の `|/-\` スピナーと `0.5s` は**実測の更新間隔**。回っていれば制御は生きている。
+> **そのまま入れれば自動で理論上限まで上がって張り付く。** 主なツマミは `coolantSetpoint` ひとつ：高出力なら下げる、安全マージンを厚くするなら上げる。
+> 画面右上のスピナーと `0.5s` は**実測の更新間隔**。回っていれば制御は生きている。
 
 ## 仕組み
 
-`peripheral.find("fissionReactorLogicAdapter")`（取れなければ `getTemperature` を持つ機器を総当たり）でアダプタを掴み、毎サイクル `getTemperature` / `getDamagePercent` / `get*FilledPercentage` 等を読む。coolant を安全ゾーン(≈100%)に保ちつつ、余裕があれば `setBurnRate` を少し上げ・冷却が崩れ始めたら即下げる auto-seek で理論上限の直下に張り付く。温度・冷却フロア・タービンの異常時はハード安全層が降圧、危険なら `scram()`。
+`peripheral.find("fissionReactorLogicAdapter")`（取れなければ `getTemperature` を持つ機器を総当たり）でアダプタを掴み、毎サイクル `getTemperature` / `getDamagePercent` / `get*FilledPercentage` 等を読む。coolant を低い設定値(既定 12%)に PI 制御で保つよう `setBurnRate` を調整し、理論上限の直下に張り付く。温度・冷却フロア・タービンの異常時はハード安全層が降圧、危険なら `scram()`。
 
 `%` 系の API は版によって割合(0-1)と %(0-100) のどちらも返しうるため、`1.0 以下なら割合とみなして ×100` で正規化している（`reactor.lua` の `toPct`）。
 
