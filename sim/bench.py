@@ -23,6 +23,7 @@ from lupa import LuaRuntime
 
 cand_path = sys.argv[1]
 cap = int(sys.argv[2]) if len(sys.argv) > 2 else 600
+kSettle = float(sys.argv[3]) if len(sys.argv) > 3 else 0.15  # 復水の速さ（小さい=遅れ大）
 with open(cand_path, encoding="utf-8") as f:
     cand_src = f.read()
 
@@ -32,7 +33,7 @@ lua.execute(cand_src)
 MODEL = r"""
 local control = control
 local maxBurn, B0, dt = 1000, __CAP__, 0.5
-local kSettle = 0.15
+local kSettle = __KSETTLE__
 local temp, coolant, heated, burn = 350, 100, 0, 0
 local mem = {}
 local TICKS = 2000
@@ -69,7 +70,7 @@ return { melted=melted, maxBurnReached=maxBurnReached, ssMean=sum/n, ssP2P=mx-mn
          ssTemp=temp, ssCoolant=coolant, ssHeated=heated, B0=B0 }
 """
 
-res = lua.execute(MODEL.replace("__CAP__", str(cap)))
+res = lua.execute(MODEL.replace("__CAP__", str(cap)).replace("__KSETTLE__", str(kSettle)))
 print(json.dumps({
     "candidate": cand_path, "B0": cap,
     "melted": bool(res["melted"]),

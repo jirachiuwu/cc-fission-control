@@ -4,7 +4,7 @@
 
 local cfg = {
   -- バージョン表示。再インストール後にヘッダのこの番号が一致すれば「最新が動いてる」と確認できる。
-  version = "b14",
+  version = "b15",
 
   -- ロジックアダプタの周辺機器名。nil なら自動検出（型名 or getTemperature を持つ機器を総当たり）。
   adapterName = nil,
@@ -67,6 +67,8 @@ local cfg = {
     -- PI ゲイン（maxBurn の割合なので炉サイズに依らない）。通常いじらない。
     piKiFraction        = 0.0008, -- 積分ゲイン（定常で coolant を設定値ぴったりに合わせる主役）
     piKpFraction        = 0.002,  -- 比例ゲイン（過渡のダンピング）
+    -- 変化率ゲート: coolant がこの速さ(%/秒)より急に落下中は「上げ」を止めて HOLD（復水待ち、行き過ぎ防止）。
+    coolantSettleTol    = 0.5,
     piUpSlewFraction    = 0.006,  -- 上げの最大速度 = maxBurn × これ /秒（起動オーバーシュート防止、控えめ）
     piDownSlewFraction  = 0.10,   -- 下げの最大速度 = maxBurn × これ /秒（下げは速くて安全）
 

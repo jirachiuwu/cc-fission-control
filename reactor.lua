@@ -231,7 +231,12 @@ function Reactor:autoAdjust(r, cfg, turbineEnergyPct)
   local Kp  = r.maxBurn * c.piKpFraction
   local err = cP - c.coolantSetpoint   -- >0 = coolant が設定値より上 = まだ攻める余地
 
-  self._piI = self._piI + Ki * err * dt
+  -- ★変化率ゲート: 設定値より下なら常に下げる。上なら「coolant が落ち着いている時だけ」上げる。
+  --   coolant が落下中（消費 > 復水で追いつき待ち）は積分を止めて HOLD ＝ 行き過ぎ（追加しすぎ）防止。
+  --   復水が追いついて落ち着いたら、また少し上げる ＝「状態を見ながらゆっくり上げる」の自動化。
+  if err < 0 or self._cRate >= -c.coolantSettleTol then
+    self._piI = self._piI + Ki * err * dt
+  end
   if self._piI < 0 then self._piI = 0 end
   if self._piI > hardMax then self._piI = hardMax end
   local out = self._piI + Kp * err
