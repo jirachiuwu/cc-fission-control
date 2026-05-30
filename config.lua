@@ -4,7 +4,7 @@
 
 local cfg = {
   -- バージョン表示。再インストール後にヘッダのこの番号が一致すれば「最新が動いてる」と確認できる。
-  version = "b12",
+  version = "b13",
 
   -- ロジックアダプタの周辺機器名。nil なら自動検出（型名 or getTemperature を持つ機器を総当たり）。
   adapterName = nil,
@@ -46,43 +46,39 @@ local cfg = {
   },
 
   ---------------------------------------------------------------------------
-  -- 自動出力制御（設計思想 v2）:
-  --   「温度を追って限界まで攻める」のではなく、「自分の構成で安全と分かっている burn rate を
-  --    設定 → そこまで緩やかに上げて保持 → 温度/冷却/タービン異常時だけ自動で下げる」。
-  --   Mekanism の冷却限界は崖（タービンが詰まると一気に dry out → 即メルトダウン）なので、
-  --   探りに行かず、既知の安全値を保持するのが正解（cc-mek-scada と同じ思想）。
+  -- 自動出力制御（設計思想 v3 = auto-seek）:
+  --   炉ごとの「捌ける最大 burn（理論上限）」を信号から自動発見して、その直下に滑らかに張り付く。
+  --   仕組み: coolant を安全ゾーン(≈100%)に保ったまま境界をなぞる。上限以下は coolant=100 で
+  --   信号が出ない＝余裕あり→ゆっくり攻める。境界を越えると coolant が下がり heated が上がる
+  --   →即引く（非対称: 引きは攻めより速い）。＝目標値を手で設定しなくても理論上限まで自動で上がる。
+  --   設計はシミュレーター（sim/）で 6 戦略を競わせ、隠し上限 250-950 全てで到達率≈100% かつ
+  --   波 P2P<9・溶融ゼロを確認した方式を採用。温度/冷却フロア/タービンはハード安全層（下げのみ）。
   ---------------------------------------------------------------------------
   control = {
     enabled             = true,
 
-    -- ★最重要★ 保持したい burn rate（mB/t、絶対値）。自分の炉で安全に回せる値を入れる。
-    -- 手動で安全に回せてた値をそのまま設定するのが確実。nil なら下の Fraction を使う。
-    targetBurnRate      = nil,
-    -- targetBurnRate=nil のとき使う、炉の最大 burn に対する割合（保守的な既定 = 10%）。
-    -- まずこれで安全に回し、様子を見て targetBurnRate に実値を入れて上げていく。
-    targetBurnFraction  = 0.10,
+    -- auto-seek 本体（速度は全て maxBurn の割合なので炉サイズに依らない）。
+    -- coolant がこれ以上 & heated がこれ以下 = 余裕あり（安全ゾーン）→ 攻める。
+    coolantHealthyPct   = 99.5,
+    heatedHealthyPct    = 0.5,
+    seekUpFraction      = 0.003,  -- 攻める速さ = maxBurn × これ /秒（max1000 で 3/秒、控えめ＝滑らか）
+    seekBrakePct        = 99.95,  -- coolant がこれ未満（=境界直下）なら攻めを弱める
+    seekBrakeFactor     = 0.25,   -- 境界直下での攻め係数（オーバーシュート抑制）
+    seekDownFraction    = 0.0015, -- ストレス時の引き = maxBurn × これ × stress /秒（非対称・速い）
+    seekBackoffFraction = 0.0003, -- 引きの微小固定分 = maxBurn × これ /秒
 
-    -- 温度は「設定値」ではなく安全装置として使う（限界探しには使わない）。
-    -- softTemp/scramTemp は profiles から決まる。softTemp 到達 or 予測で scram 超えなら burn 半減。
+    -- 安全装置（温度）。softTemp/scramTemp は profiles から決まる。
     softTemp            = 1075, -- profiles から自動計算で上書き（target と scram の中間）
     lookahead           = 4,    -- 秒: 温度上昇率からこの秒数先を予測（オーバーシュート安全側）
 
-    -- ランプ/降圧の速さ（毎秒、tickInterval で自動スケール）。
-    maxRiseFraction     = 0.01, -- 目標へ上げる速さ上限 = maxBurn × これ /秒（max1000 で 10/秒）
-    maxFallFraction     = 0.5,  -- 安全降圧の速さ上限 = maxBurn × これ /秒（下げは速くて安全）
-
+    maxFallFraction     = 0.5,  -- ハード安全降圧の速さ上限 = maxBurn × これ /秒（下げは速くて安全）
     minBurnRate         = 0.0,  -- mB/t: 下限
-    maxBurnRateFraction = 1.0,  -- 炉の上限に対する割合上限（targetBurnRate もこれで頭打ち）
+    maxBurnRateFraction = 1.0,  -- 炉の上限に対する割合上限（auto-seek もこれで頭打ち＝手動キャップにも使える）
 
-    -- 冷却の追従はクーラント残量で見る（満タン近く = 冷却が追いついている / 下がる = 過負荷）。
-    -- 残量が目標を下回ったら、温度に関係なく緩やかに burn を下げて目標へ戻す＝持続可能点に張り付く。
-    -- 復水が追いつけば残量は目標に戻り、また温度制御が上げる。少しの過渡では floor まで落ちない。
-    coolantTargetPct  = 90,   -- coolant をこれ以上にキープ（下回ったら緩降圧）
-    heatedTargetPct   = 10,   -- heated をこれ以下にキープ
-    -- 強制降圧（最終手前ガード / 急速悪化の速い保険）。scram(25/95) の手前で踏みとどまる。
-    coolantFloorPct   = 40,   -- coolant がこれ未満 → 強く降圧
+    -- ハード安全層（最終手前ガード）。scram(25/95) の手前で踏みとどまる。
+    coolantFloorPct   = 40,   -- coolant がこれ未満 → 強く降圧（COOL-SAT）
     heatedCeilPct     = 60,   -- heated がこれ超 → 強く降圧
-    coolingTrendFast  = 3.0,  -- %/秒: 急速に悪化（過渡）したら強く降圧
+    coolingTrendFast  = 3.0,  -- %/秒: 急速に悪化（崖の入り口）→ 強く降圧
   },
 
   ---------------------------------------------------------------------------

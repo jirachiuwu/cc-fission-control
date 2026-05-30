@@ -109,7 +109,7 @@ function ui.render(out, r, state, reason, cfg)
   color(out, tcol)
   out.write(r.temp and string.format("%.0fK", r.temp) or "?K")
   color(out, colors.lightGray)
-  out.write(string.format(" (tgt %.0f/scram %.0f)", cfg.control.targetTemp, cfg.safety.scramTemp))
+  out.write(string.format(" (soft %.0f/scram %.0f)", cfg.control.softTemp, cfg.safety.scramTemp))
 
   -- row4: burn rate
   out.setCursorPos(1, 4)

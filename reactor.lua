@@ -156,13 +156,13 @@ function Reactor:activate()
   return self:call("activate")
 end
 
--- 自動制御 v2（崖を探らない＝設定した安全 burn rate を保持 + 異常時のみ降圧）:
---   通常: 設定した目標 burn rate（targetBurnRate / targetBurnFraction）まで緩やかに上げて保持。
---   安全（降圧のみ。温度は限界探しに使わず安全装置として使う）:
---     COOL!     温度がソフト上限 or 予測 scram 超え → 半減
---     COOL-SAT  冷却フロア割れ / 急速悪化（タービン詰まり等で一気に dry out する崖の保険）→ 強降圧
---     EASE      クーラント残量が目標を下回る → 緩降圧で持続可能側へ
---     THROTTLE  タービン満タン → 降圧
+-- 自動制御 v3（auto-seek: 炉ごとの「捌ける最大 burn」を信号から自動発見して張り付く）:
+--   思想: coolant を安全ゾーン(≈100%)に保ったまま境界をなぞる。上限以下は coolant=100 で
+--   信号が出ない＝余裕あり→ゆっくり攻める。境界を越えると coolant が下がり heated が上がる
+--   →即引く（非対称: 引きは攻めの10倍速）。これで理論上限の直下に滑らかに張り付く。
+--   設計はシミュレーター（sim/）で複数戦略を競わせ、隠し上限 250-950 全てで上限到達 ratio≈1.0
+--   かつ波 P2P<9・溶融ゼロを確認した integral_seek 系を採用。
+--   ハード安全層（下げのみ）: COOL!(温度) / COOL-SAT(フロア割れ・急速悪化) / THROTTLE(タービン)。
 -- 戻り値: 制御内容を表す ASCII 文字列（画面で可視化）。
 function Reactor:autoAdjust(r, cfg, turbineEnergyPct)
   local c = cfg.control
@@ -170,58 +170,63 @@ function Reactor:autoAdjust(r, cfg, turbineEnergyPct)
   if r.temp == nil or r.burnRate == nil or r.maxBurn == nil then return "AUTO: no data" end
 
   local dt = cfg.tickInterval or 1
+  if self._seekCmd == nil then self._seekCmd = r.burnRate end  -- 出力指令の積分器（永続）
+
   local ratePerSec = (r.temp - (self._lastTemp or r.temp)) / dt  -- 温度上昇率 K/秒
   self._lastTemp = r.temp
   local rate = ratePerSec
-
-  local hardMax  = r.maxBurn * c.maxBurnRateFraction
-  local riseStep = r.maxBurn * c.maxRiseFraction * dt
-  local fallStep = r.maxBurn * c.maxFallFraction * dt
   local predicted = r.temp + ratePerSec * (c.lookahead or 0)
 
-  -- 冷却トレンド（急速悪化の保険用）。EMA で平滑化。
+  local hardMax  = r.maxBurn * c.maxBurnRateFraction
+  local fallStep = r.maxBurn * c.maxFallFraction * dt
+
+  -- 冷却トレンド（急速悪化＝崖の入り口検知用）。EMA で平滑化。
   local cP, hP = r.coolantPct, r.heatedPct
   self._cRate = (self._cRate or 0) * 0.6 + ((cP and (cP - (self._lastCoolant or cP)) / dt) or 0) * 0.4
   self._hRate = (self._hRate or 0) * 0.6 + ((hP and (hP - (self._lastHeated  or hP)) / dt) or 0) * 0.4
   self._lastCoolant, self._lastHeated = cP, hP
 
+  -- set: 指令(積分器)を更新しつつ実際に setBurnRate。
   local function set(newRate, fmt)
     if newRate < c.minBurnRate then newRate = c.minBurnRate end
     if newRate > hardMax then newRate = hardMax end
+    self._seekCmd = newRate
     if math.abs(newRate - r.burnRate) > 1e-4 then self:call("setBurnRate", newRate) end
     return string.format(fmt, r.burnRate, newRate, r.temp, rate)
   end
 
-  -- ===== 安全オーバーライド（下げる方向のみ）=====
+  -- ===== ハード安全層（下げる方向のみ・最終手前ガード）=====
   -- 1) 温度: ソフト上限 or 予測で scram 超え → 半減
   if r.temp >= c.softTemp or predicted >= cfg.safety.scramTemp then
-    return set(r.burnRate * 0.5, "COOL! %.1f->%.1f T=%.0f dT%+.0f")
+    return set(self._seekCmd * 0.5, "COOL! %.1f->%.1f T=%.0f dT%+.0f")
   end
-  -- 2) 冷却フロア割れ / 急速悪化（崖の保険）→ 強く下げる
+  -- 2) 冷却フロア割れ / 急速悪化（崖の入り口）→ 強く下げる
   if (cP and cP < c.coolantFloorPct) or (hP and hP > c.heatedCeilPct)
      or self._cRate < -c.coolingTrendFast or self._hRate > c.coolingTrendFast then
-    return set(r.burnRate - fallStep, "COOL-SAT %.1f->%.1f T=%.0f dT%+.0f")
+    return set(self._seekCmd - fallStep, "COOL-SAT %.1f->%.1f T=%.0f dT%+.0f")
   end
-  -- 3) クーラント残量が目標未満 → 緩降圧（持続可能側へ戻す）
-  if (cP and cP < c.coolantTargetPct) or (hP and hP > c.heatedTargetPct) then
-    return set(r.burnRate - riseStep, "EASE %.1f->%.1f T=%.0f dT%+.0f")
-  end
-  -- 4) タービン満タン → 下げる
+  -- 3) タービン満タン → 下げる
   if cfg.turbine and cfg.turbine.enabled and turbineEnergyPct ~= nil
      and turbineEnergyPct >= cfg.turbine.throttleAtPct then
-    return set(r.burnRate - fallStep, "THROTTLE %.1f->%.1f T=%.0f dT%+.0f")
+    return set(self._seekCmd - fallStep, "THROTTLE %.1f->%.1f T=%.0f dT%+.0f")
   end
 
-  -- ===== 通常: 設定した目標 burn rate へ緩やかにランプして保持 =====
-  local desired = c.targetBurnRate or (r.maxBurn * c.targetBurnFraction)
-  if desired > hardMax then desired = hardMax end
-  local eps = riseStep * 0.5
-  if r.burnRate < desired - eps then
-    return set(math.min(desired, r.burnRate + riseStep), "RAISE %.1f->%.1f T=%.0f dT%+.0f")
-  elseif r.burnRate > desired + eps then
-    return set(math.max(desired, r.burnRate - fallStep), "LOWER %.1f->%.1f T=%.0f dT%+.0f")
+  -- ===== auto-seek core: 安全ゾーン(coolant≈100)を保って境界に張り付く =====
+  -- ストレス = 冷却が健全からどれだけ離れたか（coolant 下降 / heated 上昇）。
+  local stress = 0.0
+  if cP and cP < c.coolantHealthyPct then stress = stress + (c.coolantHealthyPct - cP) end
+  if hP and hP > c.heatedHealthyPct  then stress = stress + (hP - c.heatedHealthyPct) end
+
+  if stress <= 0.0 then
+    -- 余裕あり: maxBurn の割合でゆっくり攻める。境界直下(coolant が 100 からわずかに下降)はブレーキ。
+    local g = r.maxBurn * c.seekUpFraction
+    if cP and cP < c.seekBrakePct then g = g * c.seekBrakeFactor end
+    return set(self._seekCmd + g * dt, "SEEK+ %.1f->%.1f T=%.0f dT%+.0f")
+  else
+    -- ストレス: 度合いに比例して引く（非対称・安全側）
+    local down = r.maxBurn * (c.seekDownFraction * stress + c.seekBackoffFraction)
+    return set(self._seekCmd - down * dt, "SEEK- %.1f->%.1f T=%.0f dT%+.0f")
   end
-  return string.format("HOLD %.1f/%.0f T=%.0f dT%+.0f", r.burnRate, desired, r.temp, rate)
 end
 
 Reactor.toPct = toPct
